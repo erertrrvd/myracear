@@ -1,0 +1,50 @@
+# 项目约定
+
+ROS2 比赛智能车（HW-autocar，Atlas 200I DK A2，CANN 7.0.RC1）。电脑是 Windows，另有一台 Linux 电脑用于分布式建图和 `.om` 转换。
+
+## 环境
+- 小车：`root@192.168.5.100`，仓库 `/home/racecar/src/my_racecar`（非裸仓库），摄像头 `/dev/video0`。
+- 电脑仓库：`C:\Users\lzc2\Desktop\my_racecar（复件）`，remote `car` 指向小车仓库。
+- 小车上 conda 的 `python3`（3.9，有 ais_bench）和 `/usr/bin/python3`（3.10，有 rclpy）不能放进同一个进程。
+- 电脑视觉环境：`D:\light_ai\venv\Scripts\python.exe`；模型 `D:\VSCode\ros2技术集\智能车总文件\视觉模型\模型\yolov5n_best.onnx`。
+
+## 红绿灯视觉（`camera_capture/`）
+- 两套互斥：本地 `bash start_vision.sh`，远程 `bash start_remote_vision.sh`（小车）+ `start_pc_vision.ps1`（电脑）。共用摄像头和话题名，不能同时运行。
+- 话题：`/traffic_state`（String）、`/traffic_light_box`（Float32MultiArray）；接控制：`/traffic_light_req`（运动→视觉，1 启动 0 关闭）、`/traffic_light`（视觉→运动，1 绿灯放行），远程桥需 `--enable-control`。
+- 只有明确 `green` 才放行；`stale`、off、none、conflict 都不放行。
+- 说明：《小车操作手册》第 7、8 章（见下方“文档”）。
+
+## 分布式建图（电脑端，Windows `D:\ubuntu\slam`）
+- 建图 `.\run_slam_windows.bat`（快捷键 2），保存 `-Save`（3）：存完自动描黑（`solidify_map`）+ 建图报告 `run1\report.html`（`map_report`）；`-Report` 给最新目录出报告。实时描黑默认关（`-LiveSolid`）。
+- `scan_tf_bridge` 地面线过滤默认 auto（`-Ground off|fixed`）；直接收 `/scan`（11-04 删了 scan_relay 补发、sync SLAM、车上录包、`-Bag`）。
+- 里程计只有一个：小车快捷键 1 起的 imu_encoder_mix，话题 **`/key1_odom`**（launch remap）；建图桥、move_test 等跑路径 / 录路径 launch 都只订它，默认不再自己起里程计（start_odom 默认 false）。`/key1_odom` 发布者 >1 报红字。
+- 里程计条数：一个里程计车停、车动都约 50 条/s；车动时 70 条/s 以上 = 两个来源在发同一话题（11-04 核对全部记录；之前“车动 100 是正常”的说法是错的）。
+- 高速建图（比赛约 3 m/s、两圈）：去畸变默认开（本车 /scan 时间戳是一圈的结束）；`-Fast` = `mapper_fast.yaml`（只放大回环搜索，匹配参数别放宽，会对错锥桶）；`-Odom ekf` = 电脑上 robot_localization 融合 /encoder + /IMU_data（`ekf_input` 换车上 2027 年时钟）。
+- 建图后处理顺序：save_mapping → solidify_map（描黑）→ fit_track（和规则 A/B/C/D 赛道拟合校正，分数 > 0.45 不校正）→ map_report。
+- robot_localization 的 yaml 里数字列表不能整数小数混写（ekf_node 直接退出）；ros2 daemon 会继承管道，PowerShell 里 `| Select-Object` 接 pixi 命令可能卡住。
+- pixi 环境没有 matplotlib / PIL，画图用自写 PNG / HTML。
+
+## git 规则
+- 不用 `--force`。小车是非裸仓库，不能直接推当前分支：电脑 `git push car main:from-pc`，小车 `git merge --ff-only from-pc`。
+- 小车上有未提交改动时，不用 `checkout --`、`stash`、`reset --hard`；先提交或备份。
+- 完整流程：《小车操作手册》第 2 章；报错处理：《改进与问题记录》一。
+
+## 文档（只用 PDF，不再写 md）
+- 位置：`D:\VSCode\ros2技术集\智能车总文件\my_racecar（复件）\事项\临时修改\文档\`，四份：`小车操作手册.pdf`、`改进与问题记录.pdf`、`项目进度.pdf`、`代码改动记录.pdf`。格式照 `D:\VSCode\ros2技术集\Autonomous (副本)\文档\`。
+- 内容在 `文档\源\`：`manual.py`（手册）、`issues.py`（问题与调试命令）、`progress.py`（进度）、`changes.py`（代码改动）；块类型见 `build.py` 开头注释。改完运行 `python 文档\源\build.py`：平时只重新生成网页（.html）；PDF 每月大更新一次，用 `python 文档\源\build.py --pdf`（2026-10-22 起）。
+- 章节按模块分（git、分布式建图、上传到小车、CSV 路径融合、AB 路径、红绿灯本地、红绿灯远程、模型训练），一个模块一章，章内分小节；手册每章末尾有“本章配套文件”表（第一列的位置键见 `build.py` 的 `PKG_PATH`）。新模块就加一章。
+- 让用户“看现象 / 看结果”的句子必须写清在哪看（哪个窗口 / 文件）、要不要敲命令（给完整命令）、输出长什么样、正常 / 不正常怎么判断，见约束文件 6.2。
+- 分工：手册只放成品最终运行的命令；调试、验证、排错命令（`topic hz/echo`、`-Check`、`fuser`、`md5sum` 等）放《改进与问题记录》的问题卡片和“八、调试命令”，手册里只写“见《改进与问题记录》X”。
+- 网页版：`build.py` 生成每份 PDF 时同时生成同名 `.html`（`htmldoc.py`：章 / 小节可折叠、可搜索、命令一键复制，单文件、没网也能打开），内容和 PDF 同源，不用另写。
+- 代码逐行改动：`build.py` 最后会运行 `diffs.py`，生成同目录的 `代码改动记录.html`。规范见 `C:\Users\lzc2\Desktop\AI约束文件\代码修改记录网页生成\代码修改记录网页生成规范.md`（大模块 → 功能 → 文件，每层写要求 / 实现，文件旁写作用，增删改都显示代码，以功能最终完成的净改动呈现，未验证的跟进）。内容在 `文档\源\features.py`；未提交和仓库外文件每次运行有变化就记一个记录点，快照在 `文档\源\改动快照\`（不要手动删）。每做完一件事：改 `changes.py` 总表 → 在 `features.py` 登记 / 更新功能 → 运行 build.py → 确认“未归类”为 0。
+- **每做完一件事就同步更新文档源并生成网页**（代替以前“改备份 README”；PDF 每月一次）：改了命令 → `manual.py`；遇到问题 → `issues.py` 加卡片；进度 → `progress.py`；改了代码 → `changes.py` 的总表和模块表。
+- 全局规则里的 `PROGRESS.md` 在本项目由 `项目进度.pdf`（`progress.py`）代替；旧 md（含原 `PROGRESS.md`）在 `临时修改\旧md归档\`，只读参考。
+- 改 `文档\源\*.py` 用 Edit / Write，不要用 bash heredoc 或 `python -c`（反斜杠会被吞）；Windows 路径写 `\\`，代码块用 `r"""..."""`，raw 字符串不能以 `\"` 结尾。
+- 交接时把四份 PDF 和 `文档\源\*.py` 写进交接文档的“产出文件”。
+
+## 注意
+- 验证阶段不要影响运动；不要改小车原来的视觉文件和运动代码，除非用户明确要求。
+- `src/pure_track_test.cpp` 是 GBK 编码，不要在编辑器里重新保存，传输用补丁或 git。
+- 哈希对比（`xargs`）要在 Git Bash 或小车上运行，PowerShell 里没有。
+- 写文件用 Write 工具；Bash heredoc 超约 10 KB 会被拒，反斜杠可能被减半。
+- 命令要标明在哪里运行：小车 / 电脑 PowerShell / 电脑 Git Bash。

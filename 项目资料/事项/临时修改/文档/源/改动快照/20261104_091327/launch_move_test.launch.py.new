@@ -1,0 +1,102 @@
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    return LaunchDescription([
+        # 11-04：车上只留一个里程计，就是快捷键 1（distributed_mapping_vehicle）起的那个。
+        # 跑路径前先敲 1；单独测试、没敲 1 时才用 start_odom:=true。
+        DeclareLaunchArgument('start_odom', default_value='false',
+                              description='默认不启动里程计，用快捷键 1 起的那个；没敲 1 时设为 true'),
+    
+      
+
+    
+       #启动里程计节点，定位
+        Node(
+            package='encoder_imu',
+            executable='imu_encoder_mix',
+            name='imu_encoder_mix',
+            output='screen',
+            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04：车上唯一的里程计话题（快捷键 1 起的 imu_encoder_mix）
+            condition=IfCondition(LaunchConfiguration('start_odom')),
+        ),
+    
+        #提取路径
+        Node(
+            package='my_racecar',  
+            executable='get_local_path',  # 可执行文件名称
+            name='get_local_path',
+            output='screen',
+            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04：车上唯一的里程计话题（快捷键 1 起的 imu_encoder_mix）
+            parameters=[{
+                
+                'front_dist': 0.5,
+                'pub_global_path':0,
+                'stop_point':5,  #????????????
+                'slow_point':18, 
+                'start_icp':0,
+                'ab_flag':2,
+                'concat_dy':0.0 
+                
+            }]
+            ),
+        #横向运动控制
+        Node(
+            package='my_racecar',
+            executable='pure_track_test',
+            name='pure_track_test',
+            output='screen',
+            parameters=[{
+                
+                'linear_x': 2.0,
+                'd_min':0.5,
+                'k_v':0.5,
+                'kp_yaw': 1.0,
+                'kd_yaw': 0.0,
+                'ff_kp':1.15,
+                
+                'theta_min':-25.0,
+                'theta_max':25.0,
+                
+                'f_index':5,
+
+                # ======================================================================
+                #  红绿灯：下面三行就是"选方案"的地方
+                #
+                #  【两个方案的停车逻辑完全一样】都是走到 traffic_light_index 就停住，
+                #  区别只在"怎么等到绿灯"：
+                #
+                #   方案二（light_mode = 1）★默认
+                #       到停车点后启动 yolo 认灯，认出绿灯立刻走（并关掉 yolo）；
+                #       一直认不出来就等 traffic_light_time 秒，到点当红灯处理直接走。
+                #
+                #   方案一（light_mode = 0）
+                #       不启用 yolo，到停车点就等 traffic_light_time 秒，到点直接走。
+                #
+                #  想换成方案一，就把下面这行改成：  'light_mode': 0,
+                # ======================================================================
+                'light_mode': 1,
+
+                # 等绿灯的时间，单位秒。
+                #   方案一：就是停车后等这么久然后走
+                #   方案二：最多等这么久，期间认出绿灯就提前走
+                'traffic_light_time':10.0,
+
+                # ★ 必须实测标定：车停住时刚好能看清红绿灯的那个全局路径下标。
+                #   确认方法：跑起来看日志里打印的 traffic_light_index:<下标>。
+                #   注意下面 first/second_stop_index（斑马线）现在也是 800，
+                #   要是不想让它停，就把那两个改成 999999。
+                'traffic_light_index': 125,
+                'first_stop_index': 800,
+                'second_stop_index':800,     
+                
+                'v_mode':1,    #0是速度规划模式，1是匀速模式
+                
+                'slow_v':0.8,
+                
+            }]
+        )
+    ])

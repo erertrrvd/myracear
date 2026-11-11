@@ -1,0 +1,5 @@
+{"time_utc": "2026-09-27T10:02:22.607304+00:00", "run_index": 1, "event": "start", "scans": 0, "odometry_messages": 0, "cmd_vel_messages": 0, "map_cells": 0, "occupied_cells": 0}
+{"time_utc": "2026-09-27T10:02:27.812153+00:00", "run_index": 1, "event": "status", "scans": 0, "odometry_messages": 0, "cmd_vel_messages": 0, "map_cells": 0, "occupied_cells": 0}
+{"time_utc": "2026-09-27T10:02:32.805024+00:00", "run_index": 1, "event": "status", "scans": 0, "odometry_messages": 0, "cmd_vel_messages": 0, "map_cells": 0, "occupied_cells": 0}
+{"time_utc": "2026-09-27T10:02:37.813475+00:00", "run_index": 1, "event": "status", "scans": 0, "odometry_messages": 0, "cmd_vel_messages": 0, "map_cells": 0, "occupied_cells": 0}
+{"time_utc": "2026-09-27T10:02:37.883856+00:00", "run_index": 1, "event": "stop", "scans": 0, "odometry_messages": 0, "cmd_vel_messages": 0, "map_cells": 0, "occupied_cells": 0}

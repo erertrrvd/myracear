@@ -1,0 +1,97 @@
+# ============================================================================
+#  cone_calib_run.rviz —— 初始点校准（步骤2）专用 RViz2 预设
+# ============================================================================
+#  ⚠️ 本文件是 YAML 格式 —— RViz2 原生格式。
+#     （仓库里原有的 cone_detect.rviz / scan_match.rviz 是 RViz1 的 XML 格式，
+#       RViz2 读不了，所以本项目新建的预设统一用 YAML。）
+#
+#  只看一个话题： /cone_calib_run/markers
+#
+#  图上会看到：
+#    🟢 绿色大球（带暗绿描边） = 参考基准的 4 个锥桶，标注 "R0 (x, y)"
+#    ⚫ 灰色半透明小球         = 本次检出的其它候选锥桶
+#    🔵 蓝色球                 = 本次匹配上的 4 个锥桶
+#    🟡 黄色球                 = 蓝球按解出的位姿【变换到参考系】后的位置
+#                                ★ 黄球应该和绿球几乎重合 —— 一眼看出匹配对不对
+#    🔷 青色线                 = 对应关系（蓝球 -> 绿球），标注 "C0->R2  1.2mm"
+#    🔴 红色箭头               = 车的位移偏差（放大 10 倍显示方向）
+#    🟢/🔴 状态灯              = 锥桶区域下方的大球：绿=通过，红=失败（放在这里不会被锥桶挡住）
+#
+#  ⚠️ 文字一律是英文/数字：RViz2 的 Marker 文字用 Liberation Sans 渲染，#  ⚠️ 节点只发一次就空闲，话题用了 transient_local（锁存）。
+#     下面 Durability Policy 必须保持 Transient Local，否则晚开 RViz 收不到。
+# ============================================================================
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Alpha: 0.35
+      Cell Size: 1
+      Color: 80; 85; 95
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: 校准结果
+      Namespaces: {}
+      Topic:
+        Depth: 10
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /cone_calib_run/markers
+      Value: true
+  Global Options:
+    Background Color: 18; 20; 24
+    Fixed Frame: laser_link
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 5
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 1.5698
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 0
+    Saved: ~
+Window Geometry:
+  Height: 800
+  Width: 1280
+  X: 60
+  Y: 60

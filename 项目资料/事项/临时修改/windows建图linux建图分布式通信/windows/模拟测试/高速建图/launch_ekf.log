@@ -1,0 +1,10 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-04-09-24-08-733063-DESKTOP-7JE3QFM-20676
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\test_ekf_launch；run_index=1；SLAM async；位姿来源 EKF（/encoder 轮速 + /IMU_data 角速度）；去畸变 开
+[INFO] [python.exe-1]: process started with pid [11400]
+[INFO] [python.exe-2]: process started with pid [19720]
+[INFO] [ekf_node.EXE-3]: process started with pid [4568]
+[INFO] [async_slam_toolbox_node.EXE-4]: process started with pid [4812]
+[INFO] [python.exe-5]: process started with pid [7844]
+[async_slam_toolbox_node.EXE-4] [INFO] [1793755449.295055600] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-4] [INFO] [1793755449.295239200] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.

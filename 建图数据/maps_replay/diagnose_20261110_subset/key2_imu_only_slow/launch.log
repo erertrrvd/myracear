@@ -1,0 +1,26 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-10-19-00-48-461867-DESKTOP-7JE3QFM-18404
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\diagnose_20261110_subset\key2_imu_only_slow；run_index=1；SLAM async；位姿来源 IMU 航向（无轮速）；去畸变 关
+[INFO] [python.exe-1]: process started with pid [29052]
+[INFO] [async_slam_toolbox_node.EXE-2]: process started with pid [6016]
+[INFO] [python.exe-3]: process started with pid [29216]
+[async_slam_toolbox_node.EXE-2] [INFO] [1794308448.874919900] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-2] [INFO] [1794308448.875086100] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.
+[python.exe-1] Traceback (most recent call last):
+[python.exe-1]   File "C:\Users\lzc2\Desktop\my_racecar（复件）\mapping\scripts\scan_tf_bridge", line 608, in <module>
+[python.exe-1]     main()
+[python.exe-1]   File "C:\Users\lzc2\Desktop\my_racecar（复件）\mapping\scripts\scan_tf_bridge", line 596, in main
+[python.exe-1]     node = ScanTfBridge()
+[python.exe-1]            ^^^^^^^^^^^^^^
+[python.exe-1]   File "C:\Users\lzc2\Desktop\my_racecar（复件）\mapping\scripts\scan_tf_bridge", line 251, in __init__
+[python.exe-1]     ground_mode = self.declare_parameter('ground_filter', 'auto').value
+[python.exe-1]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[python.exe-1]   File "D:\ubuntu\slam\.pixi\envs\default\Lib\site-packages\rclpy\node.py", line 367, in declare_parameter
+[python.exe-1]     return self.declare_parameters('', [args], ignore_override)[0]
+[python.exe-1]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[python.exe-1]   File "D:\ubuntu\slam\.pixi\envs\default\Lib\site-packages\rclpy\node.py", line 493, in declare_parameters
+[python.exe-1]     self._set_parameters(
+[python.exe-1]   File "D:\ubuntu\slam\.pixi\envs\default\Lib\site-packages\rclpy\node.py", line 738, in _set_parameters
+[python.exe-1]     raise InvalidParameterTypeException(
+[python.exe-1] rclpy.exceptions.InvalidParameterTypeException: Trying to set parameter 'ground_filter' to 'False' of type 'BOOL', expecting type 'STRING'
+[ERROR] [python.exe-1]: process has died [pid 29052, exit code 1, cmd 'D:\ubuntu\slam\.pixi\envs\default\python.exe C:\Users\lzc2\Desktop\my_racecar（复件）\mapping\scripts\scan_tf_bridge --ros-args -p use_odom:=true -p imu_only:=true -p deskew:=false -p scan_period:=0.1 -p stamp_at_end:=true -p odom_offset:=0.0 -p odom_wait:=1.0 -p beams:=720 -p laser_x:=0.0 -p laser_y:=0.0 -p laser_yaw:=0.0 -p ground_filter:=off -p ground_rho:=0.0 -p ground_theta_deg:=0.0 -p odom_topic:=/IMU_data -p odom_check_topic:=/IMU_data'].

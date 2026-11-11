@@ -1,0 +1,208 @@
+cmake_minimum_required(VERSION 3.8)
+project(my_racecar)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(rcpputils REQUIRED)
+find_package(Eigen3 REQUIRED)
+
+add_executable(get_distance src/get_distance.cpp)
+add_executable(get_flag src/get_flag.cpp)
+add_executable(ROI_test_node src/ROI_test.cpp)
+add_executable(get_middle_test_node src/get_middle_test.cpp)
+add_executable(get_middle_point src/get_middle_point.cpp)
+add_executable(move_control_test src/move_control_test.cpp)
+add_executable(move_control src/move_control.cpp)
+add_executable(transform_v src/transform_v.cpp)
+add_executable(point_recorder src/point_recorder.cpp)
+add_executable(key src/key.cpp)
+add_executable(odom_move_test src/odom_move_test.cpp)
+add_executable(save_path src/save_path.cpp)
+add_executable(get_local_path src/get_local_path.cpp)
+add_executable(pure_track_test src/pure_track_test.cpp)
+add_executable(map_recieve_node src/map_recieve.cpp)
+add_executable(map_pub_node src/map_pub.cpp)
+add_executable(save_init_scan src/save_init_scan.cpp)
+add_executable(initial_calibration_node src/initial_calibration.cpp)
+add_executable(cone_detect src/cone_detect.cpp)
+add_executable(save_scan src/save_scan.cpp)
+add_executable(scan_match src/scan_match.cpp)
+add_executable(cone_match src/cone_match.cpp)
+
+ament_target_dependencies(get_distance rclcpp geometry_msgs std_msgs nav_msgs)
+ament_target_dependencies(get_flag rclcpp std_msgs nav_msgs)
+ament_target_dependencies(ROI_test_node rclcpp visualization_msgs)
+ament_target_dependencies(get_middle_test_node rclcpp visualization_msgs geometry_msgs sensor_msgs)
+ament_target_dependencies(get_middle_point rclcpp visualization_msgs geometry_msgs sensor_msgs std_msgs )
+ament_target_dependencies(move_control_test rclcpp geometry_msgs std_msgs)
+ament_target_dependencies(move_control rclcpp geometry_msgs std_msgs)
+ament_target_dependencies(transform_v rclcpp geometry_msgs nav_msgs)
+ament_target_dependencies(point_recorder rclcpp std_msgs tf2_ros  geometry_msgs tf2)
+ament_target_dependencies(key rclcpp)
+ament_target_dependencies(odom_move_test rclcpp geometry_msgs nav_msgs)
+ament_target_dependencies(save_path rclcpp visualization_msgs nav_msgs std_msgs tf2_geometry_msgs)
+ament_target_dependencies(get_local_path rclcpp  nav_msgs sensor_msgs geometry_msgs visualization_msgs std_msgs tf2 tf2_ros Eigen3)
+ament_target_dependencies(pure_track_test rclcpp nav_msgs geometry_msgs std_msgs)
+ament_target_dependencies(map_recieve_node rclcpp nav_msgs std_msgs rcpputils)
+ament_target_dependencies(map_pub_node rclcpp nav_msgs std_msgs)
+ament_target_dependencies(save_init_scan rclcpp sensor_msgs)
+ament_target_dependencies(initial_calibration_node
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+  std_msgs
+  tf2
+  tf2_ros
+)
+
+target_link_libraries(initial_calibration_node Eigen3::Eigen)
+
+ament_target_dependencies(cone_detect
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+  std_msgs
+)
+
+ament_target_dependencies(save_scan
+  rclcpp
+  sensor_msgs
+)
+
+ament_target_dependencies(scan_match
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+  std_msgs
+)
+
+target_link_libraries(scan_match Eigen3::Eigen)
+
+ament_target_dependencies(cone_match
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+  std_msgs
+)
+
+target_link_libraries(cone_match Eigen3::Eigen)
+
+install(TARGETS
+  get_distance
+  get_flag
+  ROI_test_node
+  get_middle_test_node
+  get_middle_point
+  move_control_test
+  move_control
+  transform_v
+  key
+  point_recorder
+  odom_move_test
+  save_path
+  save_init_scan
+  get_local_path
+  pure_track_test
+  map_recieve_node
+  map_pub_node 
+  initial_calibration_node
+  cone_detect
+  save_scan
+  scan_match
+  cone_match
+  DESTINATION lib/${PROJECT_NAME}
+  )
+
+
+#   װlaunch ļ 
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# 安装 rviz 预设配置
+install(DIRECTORY
+  rviz
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# 安装脚本（开机修时钟等）
+install(DIRECTORY
+  scripts
+  DESTINATION share/${PROJECT_NAME}
+  USE_SOURCE_PERMISSIONS
+)
+
+# Mapping-only race workflow; original controllers remain separate.
+install(DIRECTORY mapping/ DESTINATION share/${PROJECT_NAME}/mapping
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+  PATTERN "windows" EXCLUDE)  # Windows 版 pixi 环境约 1.5 GB，ROS 运行不需要
+install(PROGRAMS
+  mapping/scripts/odom_tf_adapter
+  mapping/scripts/mapping_ready
+  mapping/scripts/mapping_status_logger
+  mapping/scripts/save_mapping
+  mapping/scripts/scan_tf_bridge
+  mapping/scripts/map_autosave
+  mapping/scripts/obstacle_layer
+  mapping/scripts/vote_map
+  mapping/scripts/solidify_map
+  mapping/scripts/map_report
+  mapping/scripts/ekf_input
+  mapping/scripts/fit_track
+  mapping/scripts/view_path_on_map
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # comment the line when a copyright and license is added to all source files
+  set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # comment the line when this package is in a git repo and when
+  # a copyright and license is added to all source files
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+# ---- 初始点校准 步骤1（AI 追加，可整段删除）----
+add_executable(cone_calib_record src/cone_calib_record.cpp)
+ament_target_dependencies(cone_calib_record
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+)
+install(TARGETS cone_calib_record DESTINATION lib/${PROJECT_NAME})
+
+# ---- 初始点校准 步骤2（AI 追加，可整段删除）----
+add_executable(cone_calib_run src/cone_calib_run.cpp)
+ament_target_dependencies(cone_calib_run
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+)
+install(TARGETS cone_calib_run DESTINATION lib/${PROJECT_NAME})
+
+ament_package()

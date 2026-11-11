@@ -1,0 +1,6 @@
+detection:
+  class_num: 3
+  weights: yolov5n
+  infer_batch_size: 1
+  quantize: false
+  soc: Ascend310B4

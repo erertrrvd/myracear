@@ -1,0 +1,2 @@
+{"time_utc": "2026-10-18T12:21:14.087578+00:00", "run_index": 1, "event": "start", "scans": 0, "odometry_messages": 0, "cmd_vel_messages": 0, "map_cells": 0, "occupied_cells": 0, "known_cells": 0}
+{"time_utc": "2026-10-18T12:21:14.510080+00:00", "run_index": 1, "event": "stop", "scans": 0, "odometry_messages": 0, "cmd_vel_messages": 0, "map_cells": 0, "occupied_cells": 0, "known_cells": 0}

@@ -1,0 +1,39 @@
+{
+  "run_index": 1,
+  "saved_at_utc": "2026-10-07T08:30:35.851890+00:00",
+  "occupied_cells": 4357,
+  "map_width": 537,
+  "map_height": 293,
+  "map_resolution": 0.05000000074505806,
+  "map_origin": {
+    "x": -15.119589543498456,
+    "y": -7.769849173062311,
+    "yaw": 0.0
+  },
+  "files": {
+    "map.posegraph": {
+      "bytes": 19759903,
+      "sha256": "f00c880f5d4a6fb31bb5b44254cd4a7f9f4c44af8e4699543d5a06b191019a5b"
+    },
+    "map.data": {
+      "bytes": 5989479,
+      "sha256": "b1e8964713d479fa3eb66e3483ff36edd7d09878c0f1d3b4f967147cb44732bd"
+    },
+    "map.pgm": {
+      "bytes": 157356,
+      "sha256": "3589dabf2e669e20cce3a701c245228f19ed93832b7f491c4f78f69278f3d82d"
+    },
+    "map.yaml": {
+      "bytes": 135,
+      "sha256": "93a497c1b99788829666506ae4571795cb4e5ebc3d3dbacccbd78628c77af440"
+    },
+    "map.raw": {
+      "bytes": 157341,
+      "sha256": "7060482641e38c313c930beca7e34eed91118e05bf8ad5be9ef0dd87ce1a8880"
+    },
+    "run.jsonl": {
+      "bytes": 7353,
+      "sha256": "97e3c2df6e81d6d8fbb5dae78e3eee198539e578c093295634e2a9969f67965b"
+    }
+  }
+}

@@ -1,0 +1,60 @@
+# 高速两圈建图（-Fast）：车速约 3 m/s、同一条路线跑两圈。在 mapper.yaml 基础上只改“回环约束”这几项，
+# 移动目标剔除（occupancy_threshold / min_pass_through）、扫描匹配搜索范围、偏离里程计惩罚都与 mapper.yaml 相同：
+# 11-03 实测放大匹配搜索、放松惩罚会把锥桶对错（间距约 1.3 m），这里不动。
+# 两圈的约束靠回环：第二圈经过第一圈的地方时，把整条轨迹拉回去。3 m/s 时一圈下来里程计漂得比 1 m/s 远，
+# 默认 4 m 的回环搜索距离可能够不着，所以放大到 8 m；接受阈值保持默认，避免锥桶排列重复时接错回环。
+# 状态：11-04 新加，还没用实车录包对比过（对比结果写进《改进与问题记录》后再决定要不要变成默认）。
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /scan
+    use_map_saver: true
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+    resolution: 0.05
+    # 移动目标剔除：与 mapper.yaml 相同（0.20/3）
+    min_pass_through: 3
+    occupancy_threshold: 0.20
+    max_laser_range: 12.0
+    minimum_time_interval: 0.05
+    throttle_scans: 1
+    scan_queue_size: 300
+    message_filter_queue_size: 300
+    queue_size: 300
+    transform_publish_period: 0.02
+    map_update_interval: 0.5
+    tf_buffer_duration: 30.0
+    transform_timeout: 1.0
+    use_scan_matching: true
+    use_scan_barycenter: true
+    # 3 m/s、10 帧/s 时相邻两帧相距约 0.3 m，0.2 m 的门槛下每帧都进图，轨迹节点更密、约束更多
+    minimum_travel_distance: 0.20
+    minimum_travel_heading: 0.15
+    scan_buffer_size: 30
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.10
+    # 匹配搜索范围、偏离里程计惩罚：与 mapper.yaml 相同（原因见文件开头）
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    coarse_search_angle_offset: 0.349
+    link_scan_maximum_distance: 3.0
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    minimum_distance_penalty: 0.5
+    minimum_angle_penalty: 0.9
+    # 回环约束（只改这里）：搜索距离 4 m -> 8 m；回环粗搜索窗口与之匹配（默认 8 m，写明）
+    loop_search_maximum_distance: 8.0
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45

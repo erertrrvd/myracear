@@ -1,0 +1,6 @@
+path: D:/light_ai/data/imagesbiaozhu
+train: images
+val: images
+nc: 1
+names:
+  0: light

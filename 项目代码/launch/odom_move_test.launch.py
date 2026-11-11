@@ -1,0 +1,40 @@
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    return LaunchDescription([
+            
+            
+        #启动里程计节点
+        Node(
+            package='encoder_imu',
+            executable='imu_encoder_mix',
+            name='imu_encoder_mix',
+            output='screen',
+        ),        
+    
+    
+        Node(
+            package='my_racecar',
+            executable='odom_move_test',
+            name='odom_move_test',
+            output='screen',
+            parameters=[{
+                # PID控制参数
+                'linear_x': 1.0,
+                'pid_kp': 0.0,
+                'pid_ki': 0.0,
+                'pid_kd': 10.0,
+                'pid_integral_limit_min': -0.0,
+                'pid_integral_limit_max': 0.0,
+                'pid_output_limit_min': -5.0,
+                'pid_output_limit_max': 5.0,
+                
+                'pure_L':0.325,
+                'pure_dx':0.4,
+                'pure_theta_max':20.0,
+                'pure_theta_min':-20.0,
+                
+            }]
+        )
+    ])

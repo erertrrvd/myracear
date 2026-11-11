@@ -1,0 +1,117 @@
+"""电脑端分布式建图入口：经 WiFi 接收车载机数据，本机 CPU 运行 SLAM Toolbox 与 RViz。
+
+前置条件（详见 mapping/DISTRIBUTED.md）：
+  1. 电脑与车载机在同一可互通局域网，两端 ROS_DOMAIN_ID 相同且 ROS_LOCALHOST_ONLY
+     均未设为 1；
+  2. 车上已运行 Run_car.sh 和 distributed_mapping_vehicle.launch.py；
+  3. 两端时钟一致，否则 TF 查询失败、扫描被丢弃（处理方法见 DISTRIBUTED.md）。
+
+保存地图（保持本 launch 运行，另开终端）：
+  ros2 run my_racecar save_mapping --run-index <run_index> --map-dir <map_dir>
+保存依赖本入口生成的 <map_dir>/.run<run_index>-live.jsonl。
+"""
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
+from launch.conditions import LaunchConfigurationEquals
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def _setup(context):
+    root = Path(LaunchConfiguration('map_dir').perform(context)).expanduser().resolve()
+    if str(root) == '/home/racecar/maps':
+        raise RuntimeError('电脑端建图不能写入车载比赛地图目录 /home/racecar/maps，请指定 map_dir')
+    run_index = int(LaunchConfiguration('run_index').perform(context))
+    if run_index not in (1, 2, 3):
+        raise RuntimeError('run_index 只能是 1、2 或 3')
+    root.mkdir(parents=True, exist_ok=True)
+
+    mapper_config = LaunchConfiguration('mapper_config').perform(context)
+    rviz_config = LaunchConfiguration('rviz_config').perform(context)
+    use_odom = LaunchConfiguration('use_odom').perform(context).lower()
+    autosave = float(LaunchConfiguration('autosave_period').perform(context))   # 秒；0=关
+    if use_odom not in ('true', 'false'):
+        raise RuntimeError('use_odom 只能是 true 或 false')
+    laser = {name: float(LaunchConfiguration(name).perform(context))
+             for name in ('laser_x', 'laser_y', 'laser_yaw')}
+    # SLAM 只用电脑端 scan_tf_bridge 生成的 /scan_pc 与 odom_pc/base_pc 帧，
+    # 与车端 /tf 的 odom/base_footprint/laser_link 完全隔离。
+    slam_overrides = {'scan_topic': '/scan_pc', 'odom_frame': 'odom_pc',
+                      'base_frame': 'base_pc', 'map_frame': 'map'}
+    if use_odom == 'false':
+        # 没有里程计时位姿恒为原点，必须每帧都做扫描匹配。
+        slam_overrides.update({'minimum_travel_distance': 0.0,
+                               'minimum_travel_heading': 0.0})
+    return [
+        Node(package='my_racecar', executable='scan_tf_bridge', output='screen',
+             parameters=[{'use_odom': use_odom == 'true',
+                      'deskew': LaunchConfiguration('deskew').perform(context).lower() == 'true',
+                      'scan_period': float(LaunchConfiguration('scan_period').perform(context)),
+                      'stamp_at_end': LaunchConfiguration('stamp_at_end').perform(context).lower() == 'true',
+                      'odom_offset': float(LaunchConfiguration('odom_offset').perform(context)),
+                      'odom_wait': float(LaunchConfiguration('odom_wait').perform(context)),
+                      'beams': int(LaunchConfiguration('beams').perform(context)),
+                      'ground_filter': LaunchConfiguration('ground_filter').perform(context),
+                      'ground_rho': float(LaunchConfiguration('ground_rho').perform(context)),
+                      'ground_theta_deg': float(LaunchConfiguration('ground_theta_deg').perform(context)),
+                      **laser}]),
+        LogInfo(msg=f'电脑端分布式建图：map_dir={root}；run_index={run_index}；'
+                    f'保存用 ros2 run my_racecar save_mapping --run-index {run_index} '
+                    f'--map-dir {root}'),
+        Node(package='slam_toolbox', executable='async_slam_toolbox_node',
+             name='slam_toolbox', output='screen',
+             parameters=[mapper_config, slam_overrides]),
+        Node(package='my_racecar', executable='mapping_status_logger',
+             output='screen',
+             arguments=[str(root / f'.run{run_index}-live.jsonl'), str(run_index),
+                        '/scan_pc', '/odom_pc']),
+        *([Node(package='my_racecar', executable='map_autosave', output='screen',
+                arguments=[str(root), str(autosave)])] if autosave > 0 else []),
+        # 两种投票地图 /map_vote_raw（只投票）、/map_vote（投票 + 地面剔除），按位姿图优化实时重投；只用来看
+        *([Node(package='my_racecar', executable='vote_map', output='screen')]
+          if LaunchConfiguration('vote').perform(context).lower() == 'true' else []),
+        # 锥桶实时描深：/map 里认出的锥桶叠黑色实心圆盘 /cone_marks（不改 /map，只用来看）
+        *([Node(package='my_racecar', executable='cone_marks', output='screen')]
+          if LaunchConfiguration('cones').perform(context).lower() == 'true' else []),
+        # 实体化障碍层：/map_solid（只用来看，不影响 SLAM）
+        *([Node(package='my_racecar', executable='obstacle_layer', output='screen',
+                arguments=[str(root), str(run_index)])]
+          if LaunchConfiguration('solid').perform(context).lower() == 'true' else []),
+        Node(package='rviz2', executable='rviz2', output='screen',
+             arguments=['-d', rviz_config],
+             condition=LaunchConfigurationEquals('rviz', 'true')),
+    ]
+
+
+def generate_launch_description():
+    share = Path(get_package_share_directory('my_racecar'))
+    defaults = {
+        'map_dir': '~/maps/distributed',
+        'run_index': '1',
+        'rviz': 'true',
+        'beams': '720',             # scan_tf_bridge 重采样点数；雷达每帧约 979 点，小于它会丢点
+        'autosave_period': '60',    # 每隔多少秒自动存一份到 <map_dir>/autosave/（0=关）
+        'use_odom': 'true',
+        'vote': 'true',             # 两种投票地图 vote_map（rviz 实时看，保存时存 map_vote*）；false 关
+        'cones': 'true',            # 锥桶实时描深 cone_marks（rviz Cone Marks 层）；false 关
+        'solid': 'false',           # 实时描黑 obstacle_layer -> /map_solid；默认关，存图后 save_mapping 自动后处理描黑
+        'deskew': 'true',           # 按里程计逐点去畸变；11-04 起默认开（高速 3 m/s 一圈内车走 30 cm）
+        'scan_period': '0.1',       # 雷达转一圈的时间（s）
+        'stamp_at_end': 'true',     # 扫描时间戳是一圈的结束（true）还是开始（false）；本车是结束（录包确认）
+        'odom_offset': '0.0',       # 查里程计位姿时给扫描时间加的偏移（s）
+        'odom_wait': '1.0',         # 扫描先扣住等经 WiFi 晚到的里程计，最多等几秒（0 = 不等）
+        'laser_x': '0.0', 'laser_y': '0.0', 'laser_yaw': '0.0',
+        'ground_filter': 'auto',    # 地面线过滤：auto 车动起来后自己认出并删掉 / fixed 用下面两个值 / off
+        'ground_rho': '0.0',        # 雷达到地面线的垂直距离（m）；0 = 不给定
+        'ground_theta_deg': '0.0',  # 地面线法向（雷达系，0 = 正前方）
+        'mapper_config': str(share / 'mapping' / 'config' / 'mapper.yaml'),
+        'rviz_config': str(share / 'mapping' / 'rviz' / 'slam_mapping.rviz'),
+    }
+    return LaunchDescription([
+        *(DeclareLaunchArgument(name, default_value=default)
+          for name, default in defaults.items()),
+        OpaqueFunction(function=_setup),
+    ])

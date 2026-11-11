@@ -1,0 +1,363 @@
+#!/usr/bin/python3
+"""两种投票地图（建图时 rviz 实时看，保存时一起存）：
+  /map_vote_raw  只投票：不做地面线过滤的扫描 /scan_pc_raw（挡板、地面线都在）
+  /map_vote      投票 + 地面剔除：SLAM 用的扫描 /scan_pc（地面线已删）
+只用来看和对比，不影响 SLAM。
+
+“投票”与 slam_toolbox 相同：每格数“被命中几次 / 被射线经过几次”（同一帧只算一次），
+经过次数 >= min_pass_through 才判断；命中比例 >= occupancy_threshold 是障碍，否则空地；
+经过次数不够是未知。偶尔扫到一次的移动物体、颠簸时的地面回波票数不够，会被剔掉。
+
+位姿（实时优化）：
+  每帧扫描插入时的位姿 = SLAM 当时的 map->odom_pc 修正 ∘ odom_pc->雷达（scan_tf_bridge 按扫描时间戳发）。
+  SLAM 之后会优化位姿图（回环、匹配纠偏），历史扫描的位置会变。本节点订阅 slam_toolbox 的位姿图节点
+  /slam_toolbox/graph_visualization（每个节点 = 一帧进图的扫描，位置是优化后的）：记下每个节点第一次出现
+  时的位置，以后它移动了，就用它前后几个节点“旧位置 -> 新位置”拟合一个局部刚体变换（平移 + 转角），
+  套到附近的关键帧上，把这些关键帧先减掉旧票、再按新位姿重新投票。所以回环后 rviz 里两层也会跟着拉正
+  （不会像以前 obstacle_layer 第一版那样旧点留在原处画出斜线）。
+  节点只有位置没有朝向，所以转角靠邻居拟合；停车时节点挤在一起，拟合不出转角就只平移。
+
+输出：/map_vote、/map_vote_raw（OccupancyGrid，map 坐标，范围和 SLAM 的 /map 对齐，transient local）；
+     save_mapping 保存时订阅这两层，存成 map_vote.* 和 map_vote_raw.*，报告里并排显示。
+
+用法（launch 里自动启动）：vote_map [--ros-args -p ...]
+"""
+import math
+import sys
+import threading
+import time
+
+import numpy as np
+import rclpy
+from nav_msgs.msg import OccupancyGrid
+from rclpy.duration import Duration
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time
+from sensor_msgs.msg import LaserScan
+from tf2_ros import Buffer, TransformListener
+from visualization_msgs.msg import Marker, MarkerArray
+
+
+def yaw_of(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+def compose(a, b):
+    """位姿相乘 a ∘ b（都是 x, y, yaw）。"""
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return (a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], a[2] + b[2])
+
+
+class KeyFrame:
+    __slots__ = ('t', 'ins', 'cur', 'amin', 'inc', 'rmin', 'rmax', 'raw', 'flt')
+
+    def __init__(self, t, ins, msg, raw, flt):
+        self.t = t                    # 本机收到的时间（和位姿图节点第一次出现的时间比，找对应节点）
+        self.ins = ins                # 插入时的 map 位姿
+        self.cur = None               # 现在投票用的位姿（None = 还没投）
+        self.amin, self.inc = msg.angle_min, msg.angle_increment
+        self.rmin, self.rmax = max(msg.range_min, 0.05), msg.range_max
+        self.raw, self.flt = raw, flt  # float32 距离（NaN/inf = 没回波 / 被地面过滤删掉）
+
+
+class Votes:
+    """一张固定大小的全局计票栅格（命中、经过各一层）。"""
+
+    def __init__(self, n, res, origin):
+        self.n, self.res, self.origin = n, res, origin
+        self.hit = np.zeros((n, n), np.int32)
+        self.pas = np.zeros((n, n), np.int32)
+
+
+class VoteMap(Node):
+    def __init__(self):
+        super().__init__('vote_map')
+        p = lambda n, d: self.declare_parameter(n, d).value
+        self.map_frame = p('map_frame', 'map')
+        self.odom_frame = p('odom_frame', 'odom_pc')
+        self.res = float(p('resolution', 0.05))
+        self.half = float(p('half_size', 60.0))              # 全局计票栅格：以起点为中心 ±60 m
+        self.max_range = float(p('max_laser_range', 12.0))   # 命中只算这个距离以内（同 mapper.yaml）
+        self.free_range = float(p('free_range', 8.0))        # 射线经过只画到这么远（省时间）
+        self.thresh = float(p('occupancy_threshold', 0.20))  # 同 mapper.yaml
+        self.min_pass = int(p('min_pass_through', 3))         # 同 mapper.yaml
+        self.kf_dist = float(p('keyframe_dist', 0.15))       # 车走这么远 / 转这么多才投一帧（停车不重复投）
+        self.kf_turn = float(p('keyframe_turn', 0.10))
+        self.period = float(p('publish_period', 1.0))
+        self.correct = bool(p('use_graph', True))             # 按位姿图优化结果重新投票
+        self.window = int(p('graph_window', 4))               # 拟合局部变换用前后几个节点
+        self.move_eps = float(p('repose_eps', 0.03))          # 位姿变化超过它（m，或它/1 m 对应的角度）才重投
+
+        n = int(round(2 * self.half / self.res))
+        self.votes = {k: Votes(n, self.res, -self.half) for k in ('raw', 'flt')}
+        self.kfs = []
+        self.lock = threading.Lock()
+        self.pending = {}             # stamp_ns -> {'raw': msg, 'flt': msg, 't': 收到时间}
+        self.last_kf_odom = None
+        self.nodes = {}               # 位姿图节点 id -> [首次 x, 首次 y, 首次本机时间, 现在 x, 现在 y]
+        self.slam_info = None
+        self.stats = dict(scans=0, kf=0, tf_miss=0, repose=0, nodes=0)
+
+        self.tf = Buffer(cache_time=Duration(seconds=30))
+        TransformListener(self.tf, self)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.pubs = {'raw': self.create_publisher(OccupancyGrid, '/map_vote_raw', latched),
+                     'flt': self.create_publisher(OccupancyGrid, '/map_vote', latched)}
+        self.create_subscription(LaserScan, '/scan_pc', lambda m: self.on_scan(m, 'flt'), qos_profile_sensor_data)
+        self.create_subscription(LaserScan, '/scan_pc_raw', lambda m: self.on_scan(m, 'raw'), qos_profile_sensor_data)
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, latched)
+        self.create_subscription(MarkerArray, '/slam_toolbox/graph_visualization', self.on_graph, 10)
+        self.create_timer(0.05, self.pair_scans)
+        self.create_timer(10.0, self.report)
+        self.running = True
+        self.worker = threading.Thread(target=self.work, daemon=True)
+        self.worker.start()
+        self.get_logger().info('投票地图启动：/scan_pc_raw -> /map_vote_raw（只投票），'
+                               '/scan_pc -> /map_vote（投票 + 地面剔除）；按位姿图优化结果实时重投'
+                               if self.correct else '投票地图启动（不按位姿图重投）')
+
+    # ---------------- 收数据（回调线程） ----------------
+    def on_map(self, msg):
+        self.slam_info = msg.info
+
+    def on_scan(self, msg, kind):
+        key = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        e = self.pending.setdefault(key, {'t': time.monotonic()})
+        e[kind] = msg
+
+    def on_graph(self, msg):
+        now = time.monotonic()
+        with self.lock:
+            for m in msg.markers:
+                if m.action != Marker.ADD or m.type != Marker.SPHERE:
+                    continue
+                x, y = m.pose.position.x, m.pose.position.y
+                e = self.nodes.get(m.id)
+                if e is None:
+                    self.nodes[m.id] = [x, y, now, x, y]
+                else:
+                    e[3], e[4] = x, y
+            self.stats['nodes'] = len(self.nodes)
+
+    def pair_scans(self):
+        """两份扫描（同一时间戳）都到了、TF 也查得到，就决定要不要作为关键帧。"""
+        now = time.monotonic()
+        for key in sorted(self.pending):
+            e = self.pending[key]
+            if now - e['t'] > 1.0:
+                if 'flt' in e:
+                    self.stats['tf_miss'] += 1
+                del self.pending[key]
+                continue
+            if 'flt' not in e or 'raw' not in e:
+                continue
+            msg = e['flt']
+            stamp = Time.from_msg(msg.header.stamp)
+            try:
+                o = self.tf.lookup_transform(self.odom_frame, msg.header.frame_id, stamp).transform
+                c = self.tf.lookup_transform(self.map_frame, self.odom_frame, Time()).transform
+            except Exception:
+                continue                     # TF 还没到，下次再试（超过 1 s 丢掉）
+            del self.pending[key]
+            self.stats['scans'] += 1
+            odom = (o.translation.x, o.translation.y, yaw_of(o.rotation))
+            if self.last_kf_odom is not None:
+                lx, ly, la = self.last_kf_odom
+                turn = abs(math.atan2(math.sin(odom[2] - la), math.cos(odom[2] - la)))
+                if math.hypot(odom[0] - lx, odom[1] - ly) < self.kf_dist and turn < self.kf_turn:
+                    continue
+            self.last_kf_odom = odom
+            corr = (c.translation.x, c.translation.y, yaw_of(c.rotation))
+            kf = KeyFrame(now, compose(corr, odom), msg,
+                          np.asarray(e['raw'].ranges, np.float32), np.asarray(msg.ranges, np.float32))
+            with self.lock:
+                self.kfs.append(kf)
+            self.stats['kf'] += 1
+
+    # ---------------- 位姿图修正 ----------------
+    def targets(self, kfs):
+        """每个关键帧现在应该用的位姿：插入位姿套上附近位姿图节点的局部变换。"""
+        with self.lock:
+            ids = sorted(self.nodes)
+            arr = np.array([self.nodes[i] for i in ids], float) if ids else np.zeros((0, 5))
+        out = [kf.ins for kf in kfs]
+        if not self.correct or len(arr) < 2:
+            return out
+        old, new, tfirst = arr[:, 0:2], arr[:, 3:5], arr[:, 2]
+        cache = {}
+        for k, kf in enumerate(kfs):
+            # 找插入前后 3 s 内第一次出现、且当时离这帧最近的节点（跑两圈时同一处有两批节点，靠时间分开）
+            near = np.flatnonzero(np.abs(tfirst - kf.t) <= 3.0)
+            if len(near) == 0:
+                continue
+            d = np.hypot(old[near, 0] - kf.ins[0], old[near, 1] - kf.ins[1])
+            j = int(near[int(np.argmin(d))])
+            if d.min() > 1.0:
+                continue
+            if j not in cache:
+                lo, hi = max(0, j - self.window), min(len(ids), j + self.window + 1)
+                o, n = old[lo:hi], new[lo:hi]
+                co, cn = o.mean(axis=0), n.mean(axis=0)
+                ang = 0.0
+                if float(np.sqrt(((o - co) ** 2).sum(axis=1).mean())) >= 0.3:
+                    a, b = o - co, n - cn
+                    ang = math.atan2(float((a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]).sum()),
+                                     float((a * b).sum()))
+                cache[j] = (co, cn, ang)
+            co, cn, ang = cache[j]
+            c, s = math.cos(ang), math.sin(ang)
+            dx, dy = kf.ins[0] - co[0], kf.ins[1] - co[1]
+            out[k] = (cn[0] + c * dx - s * dy, cn[1] + s * dx + c * dy, kf.ins[2] + ang)
+        return out
+
+    # ---------------- 投票（工作线程） ----------------
+    def cast(self, kf, pose, sign):
+        """按 pose 把这一帧的两份扫描投进（sign=+1）或撤出（sign=-1）计票栅格。"""
+        x, y, yaw = pose
+        n_beams = len(kf.raw)
+        ang = kf.amin + kf.inc * np.arange(n_beams) + yaw
+        ca, sa = np.cos(ang), np.sin(ang)
+        res = self.res
+        # 只在这一帧周围的小窗口里计数（±max_range），再加回全局栅格
+        v0 = self.votes['raw']
+        r_cells = int(math.ceil(self.max_range / res)) + 1
+        ci, cj = int((x - v0.origin) / res), int((y - v0.origin) / res)
+        i0, j0 = max(ci - r_cells, 0), max(cj - r_cells, 0)
+        i1, j1 = min(ci + r_cells + 1, v0.n), min(cj + r_cells + 1, v0.n)
+        if i1 <= i0 or j1 <= j0:
+            return
+        w, h = i1 - i0, j1 - j0
+        steps = np.arange(0.0, self.free_range, res * 0.7)
+        for kind, rng in (('raw', kf.raw), ('flt', kf.flt)):
+            v = self.votes[kind]
+            r = rng.astype(np.float64)
+            with np.errstate(invalid='ignore'):
+                ok = np.isfinite(r) & (r >= kf.rmin) & (r <= min(kf.rmax, self.max_range))
+            if not ok.any():
+                continue
+            ex, ey = x + r[ok] * ca[ok], y + r[ok] * sa[ok]
+            hi = ((ex - v.origin) / res).astype(np.int64) - i0
+            hj = ((ey - v.origin) / res).astype(np.int64) - j0
+            m = (hi >= 0) & (hi < w) & (hj >= 0) & (hj < h)
+            hit = np.zeros(w * h, bool)
+            hit[hj[m] * w + hi[m]] = True
+            # 射线经过：每条射线从雷达到回波前一点点，按 0.7 格步长取样
+            rr = np.minimum(r[ok], self.free_range)
+            d = steps[None, :]
+            use = d < (rr[:, None] - res * 0.5)
+            fx = (x + d * ca[ok][:, None] - v.origin) / res
+            fy = (y + d * sa[ok][:, None] - v.origin) / res
+            fi = fx[use].astype(np.int64) - i0
+            fj = fy[use].astype(np.int64) - j0
+            m = (fi >= 0) & (fi < w) & (fj >= 0) & (fj < h)
+            pas = np.zeros(w * h, bool)
+            pas[fj[m] * w + fi[m]] = True
+            pas |= hit
+            v.hit[j0:j1, i0:i1] += sign * hit.reshape(h, w)
+            v.pas[j0:j1, i0:i1] += sign * pas.reshape(h, w)
+
+    def work(self):
+        last_pub = 0.0
+        while self.running:
+            with self.lock:
+                kfs = list(self.kfs)
+            tgt = self.targets(kfs)
+            todo = []
+            for kf, t in zip(kfs, tgt):
+                if kf.cur is None:
+                    todo.append((0.0, kf, t))
+                else:
+                    err = math.hypot(t[0] - kf.cur[0], t[1] - kf.cur[1]) + abs(t[2] - kf.cur[2])
+                    if err > self.move_eps:
+                        todo.append((-err, kf, t))
+            todo.sort(key=lambda e: (e[1].cur is not None, e[0]))   # 新帧先投，再按偏差大的先重投
+            start = time.monotonic()
+            for _, kf, t in todo:
+                if kf.cur is not None:
+                    self.cast(kf, kf.cur, -1)
+                    self.stats['repose'] += 1
+                self.cast(kf, t, +1)
+                kf.cur = t
+                if time.monotonic() - start > 0.5:
+                    break
+            if time.monotonic() - last_pub >= self.period:
+                last_pub = time.monotonic()
+                try:
+                    self.publish()
+                except Exception as exc:       # 发布失败不影响继续投票
+                    self.get_logger().warn(f'发布投票地图失败：{exc}')
+            if not todo:
+                time.sleep(0.05)
+
+    def grid_of(self, v, info):
+        """按 SLAM /map 的范围裁出 OccupancyGrid 数据（100 障碍 / 0 空 / -1 未知）。"""
+        res = v.res
+        if info is not None and abs(info.resolution - res) < 1e-6:
+            ox, oy, w, h = info.origin.position.x, info.origin.position.y, info.width, info.height
+        else:
+            known = np.argwhere(v.pas > 0)
+            if len(known) == 0:
+                return None
+            (j0, i0), (j1, i1) = known.min(axis=0), known.max(axis=0)
+            ox, oy = v.origin + i0 * res, v.origin + j0 * res
+            w, h = int(i1 - i0 + 1), int(j1 - j0 + 1)
+        i0 = int(round((ox - v.origin) / res))
+        j0 = int(round((oy - v.origin) / res))
+        out = np.full((h, w), -1, np.int8)
+        si0, sj0 = max(i0, 0), max(j0, 0)
+        si1, sj1 = min(i0 + w, v.n), min(j0 + h, v.n)
+        if si1 > si0 and sj1 > sj0:
+            hit = v.hit[sj0:sj1, si0:si1]
+            pas = v.pas[sj0:sj1, si0:si1]
+            with np.errstate(invalid='ignore', divide='ignore'):
+                occ = hit >= self.thresh * pas
+            sub = np.where(pas >= self.min_pass, np.where(occ, 100, 0), -1).astype(np.int8)
+            out[sj0 - j0:sj1 - j0, si0 - i0:si1 - i0] = sub
+        return out, ox, oy, w, h
+
+    def publish(self):
+        info = self.slam_info
+        for kind, pub in self.pubs.items():
+            g = self.grid_of(self.votes[kind], info)
+            if g is None:
+                continue
+            data, ox, oy, w, h = g
+            msg = OccupancyGrid()
+            msg.header.frame_id = self.map_frame
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.info.resolution = self.res
+            msg.info.width, msg.info.height = w, h
+            msg.info.origin.position.x, msg.info.origin.position.y = ox, oy
+            msg.info.origin.orientation.w = 1.0
+            msg.data = data.ravel().tolist()
+            pub.publish(msg)
+
+    def report(self):
+        s = self.stats
+        with self.lock:
+            moved = sum(1 for e in self.nodes.values() if math.hypot(e[3] - e[0], e[4] - e[1]) > 0.05)
+        self.get_logger().info(
+            f'投票地图：收到扫描 {s["scans"]} 帧、投了 {s["kf"]} 个关键帧、按优化结果重投 {s["repose"]} 次；'
+            f'位姿图节点 {s["nodes"]} 个（被优化挪动超过 5 cm 的 {moved} 个）；TF 查不到丢掉 {s["tf_miss"]} 帧')
+
+    def destroy_node(self):
+        self.running = False
+        super().destroy_node()
+
+
+def main():
+    rclpy.init(args=sys.argv)
+    node = VoteMap()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,13 @@
+[workspace]
+name = "racecar-windows-slam"
+version = "0.1.0"
+channels = ["https://prefix.dev/robostack-humble", "https://prefix.dev/conda-forge"]
+platforms = ["win-64"]
+
+[dependencies]
+python = "3.12.*"
+ros-humble-ros-base = "*"
+ros-humble-slam-toolbox = "*"
+ros-humble-ros2launch = "*"
+ros-humble-rclpy = "*"
+ros-humble-rviz2 = ">=11.2.26,<12"

@@ -1,0 +1,8 @@
+# YOLOv5 v7.0 训练用的数据配置：把 path 改成你解压 light_dataset.zip 的位置
+path: /你解压的位置/light_dataset
+train: images/train
+val: images/val
+names:
+  0: light_box
+  1: red_on
+  2: green_on

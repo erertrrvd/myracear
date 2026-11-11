@@ -1,0 +1,85 @@
+# ============================================================
+# ① colcon 工作空间产物
+# ============================================================
+build/
+install/
+log/
+
+# ============================================================
+# ② ROS 2 运行产物
+# ============================================================
+# rosbag2 record 生成的目录（里面是 .db3 + metadata.yaml）
+rosbag2_*/
+# launch / 节点日志
+*.log
+*.bag
+*.db3
+*.db3-shm
+*.db3-wal
+*.mcap
+
+# ============================================================
+# ③ Python（ament_python 包、launch 脚本）
+# ============================================================
+__pycache__/
+*.pyc
+*.pyo
+# Python 打包产物
+*.egg-info/
+# 跑 ament_lint 测试时生成
+.pytest_cache/
+
+# ============================================================
+# ④ C/C++ 编译产物
+# ============================================================
+*.o
+*.d
+# 如果 my_racecar 里有必须一起发布的预编译库，把下面两行注释掉
+*.so
+*.a
+# 万一在包内跑过 cmake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+# C++ 开发工具生成
+compile_commands.json
+.clangd/
+
+# ============================================================
+# ⑤ 你自己项目的运行日志
+# ============================================================
+# get_local_path 写到 /home/car_log/
+path_tracking_*.csv
+# transform_v 写到 /home/log/
+pid_*.csv
+
+# 采集的视频和抽帧图片（camera_capture/record_video.py 输出到 camera_capture/videos/）
+camera_capture/videos/*
+!camera_capture/videos/.gitkeep
+camera_capture/images/
+*.mp4
+*.avi
+# 红绿灯模型：.onnx 用 scp 单独拷，.om 在车上转换生成；转换的中间产物
+camera_capture/*.onnx
+camera_capture/output/
+camera_capture/kernel_meta*/
+camera_capture/fusion_result.json
+*.om
+__pycache__/
+
+# ============================================================
+# ⑥ 编辑器 / 系统
+# ============================================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ============================================================
+# 千万不要加 *.csv
+#   include/path.csv       录出来的赛道，丢了要重新推车录
+#   include/init_scan.csv  ICP 参考点云
+# ============================================================

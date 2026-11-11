@@ -1,0 +1,171 @@
+diff --git a/launch/final_start.launch.py b/launch/final_start.launch.py
+index 7feba54..98d495f 100644
+--- a/launch/final_start.launch.py
++++ b/launch/final_start.launch.py
+@@ -352,6 +352,7 @@ def generate_launch_description():
+             output='screen',
+             parameters=[parameters],
+             remappings=[
++                ('/encoder_imu_odom', '/key1_odom'),  # 11-04������Ψһ����̼ƻ��⣨��ݼ� 1 ��� imu_encoder_mix��
+                 ('flag', '/flag'),
+                 ('traffic_light', '/traffic_light')
+             ]
+diff --git a/launch/move_new.launch.py b/launch/move_new.launch.py
+index 29a9bd0..e950fda 100644
+--- a/launch/move_new.launch.py
++++ b/launch/move_new.launch.py
+@@ -16,6 +16,7 @@ def generate_launch_description():
+             executable='get_local_path',  # ��ִ���ļ�����
+             name='get_local_path',
+             output='screen',
++            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04������Ψһ����̼ƻ��⣨��ݼ� 1 ��� imu_encoder_mix��
+             parameters=[{
+                 
+                 'front_dist': 0.5,
+diff --git a/launch/move_test.launch.py b/launch/move_test.launch.py
+index 4b3db25..4caeaac 100644
+--- a/launch/move_test.launch.py
++++ b/launch/move_test.launch.py
+@@ -6,8 +6,10 @@ from launch_ros.actions import Node
+ 
+ def generate_launch_description():
+     return LaunchDescription([
+-        DeclareLaunchArgument('start_odom', default_value='true',
+-                              description='保持原入口默认启动里程计；组合建图入口设为 false'),
++        # 11-04：车上只留一个里程计，就是快捷键 1（distributed_mapping_vehicle）起的那个。
++        # 跑路径前先敲 1；单独测试、没敲 1 时才用 start_odom:=true。
++        DeclareLaunchArgument('start_odom', default_value='false',
++                              description='默认不启动里程计，用快捷键 1 起的那个；没敲 1 时设为 true'),
+     
+       
+ 
+@@ -18,6 +20,7 @@ def generate_launch_description():
+             executable='imu_encoder_mix',
+             name='imu_encoder_mix',
+             output='screen',
++            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04：车上唯一的里程计话题（快捷键 1 起的 imu_encoder_mix）
+             condition=IfCondition(LaunchConfiguration('start_odom')),
+         ),
+     
+@@ -27,6 +30,7 @@ def generate_launch_description():
+             executable='get_local_path',  # 可执行文件名称
+             name='get_local_path',
+             output='screen',
++            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04：车上唯一的里程计话题（快捷键 1 起的 imu_encoder_mix）
+             parameters=[{
+                 
+                 'front_dist': 0.5,
+diff --git a/launch/odom_move_test.launch.py b/launch/odom_move_test.launch.py
+index 27cce00..dc11851 100644
+--- a/launch/odom_move_test.launch.py
++++ b/launch/odom_move_test.launch.py
+@@ -1,8 +1,13 @@
+ from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument
++from launch.conditions import IfCondition
++from launch.substitutions import LaunchConfiguration
+ from launch_ros.actions import Node
+ 
+ def generate_launch_description():
+     return LaunchDescription([
++        # 11-04������ֻ��һ����̼ƣ���ݼ� 1 ��ģ���û�� 1 ������ʱ start_odom:=true
++        DeclareLaunchArgument('start_odom', default_value='false'),
+             
+             
+         #������̼ƽڵ�
+@@ -11,6 +16,8 @@ def generate_launch_description():
+             executable='imu_encoder_mix',
+             name='imu_encoder_mix',
+             output='screen',
++            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04������Ψһ����̼ƻ��⣨��ݼ� 1 ��� imu_encoder_mix��
++            condition=IfCondition(LaunchConfiguration('start_odom')),
+         ),        
+     
+     
+@@ -19,6 +26,7 @@ def generate_launch_description():
+             executable='odom_move_test',
+             name='odom_move_test',
+             output='screen',
++            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04������Ψһ����̼ƻ��⣨��ݼ� 1 ��� imu_encoder_mix��
+             parameters=[{
+                 # PID���Ʋ���
+                 'linear_x': 1.0,
+diff --git a/launch/save_path.launch.py b/launch/save_path.launch.py
+index 1c29b93..db3d512 100644
+--- a/launch/save_path.launch.py
++++ b/launch/save_path.launch.py
+@@ -1,8 +1,13 @@
+ from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument
++from launch.conditions import IfCondition
++from launch.substitutions import LaunchConfiguration
+ from launch_ros.actions import Node
+ 
+ def generate_launch_description():
+     return LaunchDescription([
++        # 11-04������ֻ��һ����̼ƣ���ݼ� 1 ��ģ���û�� 1 ������ʱ start_odom:=true
++        DeclareLaunchArgument('start_odom', default_value='false'),
+             
+         Node(
+             package='my_racecar',
+@@ -18,6 +23,8 @@ def generate_launch_description():
+             executable='imu_encoder_mix',
+             name='imu_encoder_mix',
+             output='screen',
++            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04������Ψһ����̼ƻ��⣨��ݼ� 1 ��� imu_encoder_mix��
++            condition=IfCondition(LaunchConfiguration('start_odom')),
+         ),        
+             
+     
+@@ -26,6 +33,7 @@ def generate_launch_description():
+             executable='save_path',
+             name='save_path',
+             output='screen',
++            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04������Ψһ����̼ƻ��⣨��ݼ� 1 ��� imu_encoder_mix��
+             parameters=[{
+                 'save_dx': 0.1,
+             }]
+diff --git a/scripts/record_seg.py b/scripts/record_seg.py
+index 644a9de..3c302c5 100644
+--- a/scripts/record_seg.py
++++ b/scripts/record_seg.py
+@@ -11,8 +11,8 @@
+ 会自动 source /opt/ros/*/setup.bash 和工作空间的 setup.bash，然后重跑自己。
+ （conda 的 python 没有 rclpy，脚本会用 /usr/bin/python3 重跑，不用 conda deactivate）
+ 
+-会自动把 imu_encoder_mix 和 get_distance 起起来（已经在跑就不重复起），
+-Ctrl+C 时一起关掉。所以一个终端就够。
++里程计用快捷键 1 起的 imu_encoder_mix（11-04 起车上只留这一个；没在跑会提示先敲 1）；
++get_distance 会自动起（已经在跑就不重复起），Ctrl+C 时一起关掉。
+ 
+ 输出格式和固件 save_path 一致：表头 x,y,yaw,type + 每行 x,y,yaw,1
+ 这个格式可以直接拖进「AB停车轨迹转换器.html」。
+@@ -159,7 +159,7 @@ class Recorder(Node):
+         self.px = self.py = None
+ 
+         self.create_subscription(Float32, "distance", self.on_dis, 10)
+-        self.create_subscription(Odometry, "/encoder_imu_odom", self.on_odom, 10)
++        self.create_subscription(Odometry, "/key1_odom", self.on_odom, 10)   # 快捷键 1 起的里程计（11-04 改名）
+         self.get_logger().info("输出文件 : %s" % self.out)
+         self.get_logger().info("点距     : %.3f m" % dx)
+         self.get_logger().info("等数据中…… 车摆好后开始推，Ctrl+C 结束")
+@@ -244,6 +244,10 @@ def main():
+         return 0
+     key = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_KEY
+     out = FILES.get(key.lower(), key if os.path.isabs(key) else os.path.join(PT, key))
++    # 11-04：车上只留一个里程计（快捷键 1 起的），本脚本不再自己起 imu_encoder_mix
++    if not alive("key1_odom"):          # launch 把 remap 写在命令行里：-r /encoder_imu_odom:=/key1_odom
++        print("!! 没有里程计在运行：先在小车另一个终端敲 1（启动 imu_encoder_mix），再运行本脚本")
++        return 1
+     os.makedirs(os.path.dirname(out), exist_ok=True)
+ 
+     if os.path.exists(out):
+@@ -253,7 +257,7 @@ def main():
+ 
+     kids = []
+     print("=" * 54)
+-    start_node("imu_encoder_mix", "encoder_imu", kids)
++    print("[node] imu_encoder_mix 已在运行（快捷键 1 起的），用它")
+     start_node("get_distance", "my_racecar", kids)
+     print("=" * 54)
+ 

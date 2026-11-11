@@ -1,0 +1,83 @@
+#!/usr/bin/python3
+"""车端转发：把 /scan、/encoder_imu_odom 用"可靠 + 留存"方式重发给电脑，抗 WiFi 丢包。
+
+原来电脑直接收 /scan（Best Effort）：WiFi 丢掉的帧就没了，断几秒车又快时 SLAM 会对不上。本节点在车上
+本地订阅（不经 WiFi，不丢），再发布：
+  /scan_relay（LaserScan，去掉 intensities，体积减半）
+  /odom_relay（Odometry）
+QoS = RELIABLE + TRANSIENT_LOCAL + KEEP_LAST（深度 = buffer_s 秒的量）：
+  - 丢包：DDS 自动重传，电脑一帧不少；
+  - 断线：车上一直在存，网络恢复后（哪怕 DDS 已判定掉线、重新发现）把最近 buffer_s 秒的数据补发过去；
+  - 断得比 buffer_s 还久：最早那段补不回来，靠车上录的 bag 离线重建。
+电脑端 scan_tf_bridge 负责去重、按时间排序、等里程计到齐、限速喂给 slam_toolbox。
+只读传感器话题，不发任何控制指令，不影响运动。
+"""
+import rclpy
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy,
+                       qos_profile_sensor_data)
+from sensor_msgs.msg import LaserScan
+
+
+def keep_qos(depth):
+    return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=depth,
+                      reliability=ReliabilityPolicy.RELIABLE,
+                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+
+class ScanRelay(Node):
+    def __init__(self):
+        super().__init__('scan_relay')
+        buffer_s = float(self.declare_parameter('buffer_s', 60.0).value)
+        scan_hz = float(self.declare_parameter('scan_hz', 10.0).value)
+        odom_hz = float(self.declare_parameter('odom_hz', 50.0).value)
+        self.keep_intensities = bool(self.declare_parameter('keep_intensities', False).value)
+        self.scan_pub = self.create_publisher(LaserScan, '/scan_relay',
+                                              keep_qos(max(10, int(buffer_s * scan_hz))))
+        self.odom_pub = self.create_publisher(Odometry, '/odom_relay',
+                                              keep_qos(max(10, int(buffer_s * odom_hz))))
+        self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+        self.create_subscription(Odometry, '/encoder_imu_odom', self.on_odom, 50)
+        self.scans = self.odoms = 0
+        self.create_timer(10.0, self.report)
+        self.get_logger().info(
+            f'scan_relay：/scan -> /scan_relay，/encoder_imu_odom -> /odom_relay；'
+            f'可靠传输，车上保留最近 {buffer_s:.0f} 秒供断线后补发')
+
+    def on_scan(self, msg):
+        if not self.keep_intensities:
+            msg.intensities = []
+        self.scan_pub.publish(msg)
+        self.scans += 1
+
+    def on_odom(self, msg):
+        self.odom_pub.publish(msg)
+        self.odoms += 1
+
+    def report(self):
+        subs = self.scan_pub.get_subscription_count()
+        self.get_logger().info(f'10s 内转发扫描 {self.scans} 帧、里程计 {self.odoms} 条；'
+                               f'电脑端订阅者 {subs} 个')
+        if self.scans == 0:
+            self.get_logger().warn('10s 内没有收到 /scan：雷达驱动（Run_car_safe.sh）在运行吗？')
+        if self.odoms == 0:
+            self.get_logger().warn('10s 内没有收到 /encoder_imu_odom：imu_encoder_mix 在运行吗？')
+        self.scans = self.odoms = 0
+
+
+def main():
+    rclpy.init()
+    node = ScanRelay()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

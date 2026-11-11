@@ -1,0 +1,382 @@
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+
+
+
+# 定义所有参数
+parametersa = {
+     # GetDistance 节点参数
+    'distance_k': 1.0,
+
+    # GetFlag 节点参数
+    'yellow_start_x': 2.4,      # 黄色圆弧起始点x坐标 0.2
+    'yellow_start_y': 0.0,      # 黄色圆弧起始点y坐标  
+    'yellow_length': 6.15,       # 黄色圆弧持续路程
+    
+    'direct_turn_start_x': -10.5, # 直角拐弯起始点x坐标
+    'direct_turn_start_y': 1.15 , # 直角拐弯起始点y坐标
+    'direct_turn_length': 1.35,  # 直角拐弯持续路程
+    'direct_turn_dx': 0.7,      # 直角拐弯x方向阈值
+    'direct_turn_dy': 0.10,      # 直角拐弯y方向阈值
+    
+    'ab_stop_start_x': -5.0,     # AB停车起始点x坐标
+    'ab_stop_start_y': 0.0,     # AB停车起始点y坐标
+    'ab_stop_length1': 1.05,     # AB停车第一阶段路程
+    'ab_stop_length2': 1.05,     # AB停车第二阶段路程
+    
+    'traffic_light_area':1500, #红绿灯面积
+    
+    'fix_dx':0.0,  #修正x
+    'fix_dy':-0.4,  #修正y
+    
+    
+    
+    # get_middle_point 节点参数
+    'middle_dx':0.1,
+    'middle_point_num':5,
+    
+    
+    # MoveControl 节点参数
+    'angular_z': 88.0,
+    'stop_linear_x': 0.0,
+    'ab_flag': 1,
+    
+    # A停车参数
+    'a_linear_x1': 1.0,
+    'a_angular_z1': 97.0,
+    'a_linear_x2': 1.0,
+    'a_angular_z2': 95.0,
+    
+    # B停车参数
+    'b_linear_x1': 1.0,
+    'b_angular_z1': 76.0,
+    'b_linear_x2': 1.0,
+    'b_angular_z2': 82.0,
+    
+    # 第一圈参数
+    'linear_x': 0.0,
+    'pid_kp': 0.0,
+    'pid_ki': 0.0,
+    'pid_kd': 0.0,
+    'pid_integral_limit_min': -8.0,
+    'pid_integral_limit_max': 8.0,
+    'pid_output_limit_min': -20.0,
+    'pid_output_limit_max': 20.0,
+    
+    'yellow_angular_z': 111.5,
+    'yellow_linear_x': 1.8,
+    'direct_angular_z': 123.0,
+    'direct_linear_x': 1.8,
+
+    #纯追踪参数
+    'L':0.325,
+    'dx':0.4,
+    'theta_max':15.0,
+    'theta_min':-15.0,
+    'pure_k':0.4,
+}
+
+
+parametersb = {
+     # GetDistance 节点参数
+    'distance_k': 1.0,
+
+    # GetFlag 节点参数
+    'yellow_start_x': 2.6,      # 黄色圆弧起始点x坐标 0.2
+    'yellow_start_y': 0.0,      # 黄色圆弧起始点y坐标  
+    'yellow_length': 5.9,       # 黄色圆弧持续路程
+    
+    'direct_turn_start_x': -9.29, # 直角拐弯起始点x坐标
+    'direct_turn_start_y': 3.70, # 直角拐弯起始点y坐标
+    'direct_turn_length': 1.35,  # 直角拐弯持续路程
+    'direct_turn_dx': 0.05,      # 直角拐弯x方向阈值
+    'direct_turn_dy': 0.75,      # 直角拐弯y方向阈值
+    
+    'ab_stop_start_x': -5.0,     # AB停车起始点x坐标
+    'ab_stop_start_y': 0.0,     # AB停车起始点y坐标
+    'ab_stop_length1': 0.9,     # AB停车第一阶段路程
+    'ab_stop_length2': 0.9,     # AB停车第二阶段路程
+    
+    'traffic_light_area':1500, #红绿灯面积
+    
+    'fix_dx':0.0,  #修正x
+    'fix_dy':-0.2,  #修正y
+    
+    # MoveControl 节点参数
+    'angular_z': 88.0,
+    'stop_linear_x': 1500.0,
+    'ab_flag': 2,
+    
+    # A停车参数
+    'a_linear_x1': 1525.0,
+    'a_angular_z1': 95.0,
+    'a_linear_x2': 1525.0,
+    'a_angular_z2': 93.0,
+    
+    # B停车参数
+    'b_linear_x1': 1525.0,
+    'b_angular_z1': 76.0,
+    'b_linear_x2': 1525.0,
+    'b_angular_z2': 82.0,
+    
+    # 第一圈参数
+    'linear_x1': 1522.0,
+    'pid_kp1': 170.0,
+    'pid_ki1': 0.0,
+    'pid_kd1': 200.0,
+    'pid_integral_limit_min1': 0.0,
+    'pid_integral_limit_max1': 0.0,
+    'pid_output_limit_min1': -80.0,
+    'pid_output_limit_max1': 80.0,
+    'yellow_angular_z1': 113.0,
+    'yellow_linear_x1': 1522.0,
+    'direct_angular_z1': 123.0,
+    'direct_linear_x1': 1522.0,
+    
+    # 第二圈参数
+    'linear_x2': 1530.0,
+    'pid_kp2': 170.0,
+    'pid_ki2': 0.0,
+    'pid_kd2': 200.0,
+    'pid_integral_limit_min2': 0.0,
+    'pid_integral_limit_max2': 0.0,
+    'pid_output_limit_min2': -80.0,
+    'pid_output_limit_max2': 80.0,
+    'yellow_angular_z2': 113.0,
+    'yellow_linear_x2': 1530.0,
+    'direct_angular_z2': 123.0,
+    'direct_linear_x2': 1530.0,
+}
+
+
+
+
+parametersc = {
+     # GetDistance 节点参数
+    'distance_k': 1.0,
+
+    # GetFlag 节点参数
+    'yellow_start_x': 5.65,      # 黄色圆弧起始点x坐标 0.2
+    'yellow_start_y': 0.3,      # 黄色圆弧起始点y坐标  
+    'yellow_length': 6.0,       # 黄色圆弧持续路程
+    
+    'direct_turn_start_x': -7.35, # 直角拐弯起始点x坐标
+    'direct_turn_start_y': 0.67 , # 直角拐弯起始点y坐标
+    'direct_turn_length': 1.35,  # 直角拐弯持续路程
+    'direct_turn_dx': 0.75,      # 直角拐弯x方向阈值
+    'direct_turn_dy': 0.05,      # 直角拐弯y方向阈值
+    
+    'ab_stop_start_x': -5.0,     # AB停车起始点x坐标
+    'ab_stop_start_y': 0.0,     # AB停车起始点y坐标
+    'ab_stop_length1': 1.1,     # AB停车第一阶段路程
+    'ab_stop_length2': 1.1,     # AB停车第二阶段路程
+    
+    'traffic_light_area':1500, #红绿灯面积
+    
+    'fix_dx':0.0,  #修正x
+    'fix_dy':-0.2,  #修正y
+    
+    # MoveControl 节点参数
+    'angular_z': 88.0,
+    'stop_linear_x': 1500.0,
+    'ab_flag': 2,
+    
+    # A停车参数
+    'a_linear_x1': 1525.0,
+    'a_angular_z1': 96.0,
+    'a_linear_x2': 1525.0,
+    'a_angular_z2': 94.0,
+    
+    # B停车参数
+    'b_linear_x1': 1525.0,
+    'b_angular_z1': 76.0,
+    'b_linear_x2': 1525.0,
+    'b_angular_z2': 82.0,
+    
+    # 第一圈参数
+    'linear_x1': 1540.0,
+    'pid_kp1': 170.0,
+    'pid_ki1': 0.0,
+    'pid_kd1': 200.0,
+    'pid_integral_limit_min1': 0.0,
+    'pid_integral_limit_max1': 0.0,
+    'pid_output_limit_min1': -80.0,
+    'pid_output_limit_max1': 80.0,
+    'yellow_angular_z1': 112.0,
+    'yellow_linear_x1': 1540.0,
+    'direct_angular_z1': 123.0,
+    'direct_linear_x1': 1540.0,
+    
+    # 第二圈参数
+    'linear_x2': 1540.0,
+    'pid_kp2': 170.0,
+    'pid_ki2': 0.0,
+    'pid_kd2': 200.0,
+    'pid_integral_limit_min2': 0.0,
+    'pid_integral_limit_max2': 0.0,
+    'pid_output_limit_min2': -80.0,
+    'pid_output_limit_max2': 80.0,
+    'yellow_angular_z2': 112.0,
+    'yellow_linear_x2': 1540.0,
+    'direct_angular_z2': 123.0,
+    'direct_linear_x2': 1540.0,
+}
+
+
+
+
+
+parametersd = {
+     # GetDistance 节点参数
+    'distance_k': 1.0,
+
+    # GetFlag 节点参数
+    'yellow_start_x': 6.02,      # 黄色圆弧起始点x坐标 0.2
+    'yellow_start_y': 0.0,      # 黄色圆弧起始点y坐标  
+    'yellow_length': 5.9,       # 黄色圆弧持续路程
+    
+    'direct_turn_start_x': -7.5, # 直角拐弯起始点x坐标
+    'direct_turn_start_y': 1.1 , # 直角拐弯起始点y坐标
+    'direct_turn_length': 1.35,  # 直角拐弯持续路程
+    'direct_turn_dx': 0.75,      # 直角拐弯x方向阈值
+    'direct_turn_dy': 0.1,      # 直角拐弯y方向阈值
+    
+    'ab_stop_start_x': -5.0,     # AB停车起始点x坐标
+    'ab_stop_start_y': 0.0,     # AB停车起始点y坐标
+    'ab_stop_length1': 0.9,     # AB停车第一阶段路程
+    'ab_stop_length2': 0.9,     # AB停车第二阶段路程
+    
+    'traffic_light_area':1500, #红绿灯面积
+    
+    'fix_dx':0.0,  #修正x
+    'fix_dy':-0.2,  #修正y
+    
+    # MoveControl 节点参数
+    'angular_z': 0.0,
+    'stop_linear_x': 0.8,
+    'ab_flag': 1,
+    
+    # A停车参数
+    'a_linear_x1': 0.0,
+    'a_angular_z1': 0.0,
+    'a_linear_x2': 0.0,
+    'a_angular_z2': 0.0,
+    
+    # B停车参数
+    'b_linear_x1': 0.0,
+    'b_angular_z1': 0.0,
+    'b_linear_x2': 0.0,
+    'b_angular_z2': 0.0,
+    
+    # 第一圈参数
+    'linear_x1': 0.8,
+    'pid_kp1': 0.0,
+    'pid_ki1': 0.0,
+    'pid_kd1': 0.0,
+    'pid_integral_limit_min1': 0.0,
+    'pid_integral_limit_max1': 0.0,
+    'pid_output_limit_min1': -80.0,
+    'pid_output_limit_max1': 80.0,
+    
+    'yellow_angular_z1': 11.0,
+    'yellow_linear_x1': 0.8,
+    'direct_angular_z1': 16.5,
+    'direct_linear_x1': 0.8,
+    
+    # 第二圈参数
+    'linear_x2': 0.8,
+    'pid_kp2': 0.0,
+    'pid_ki2': 0.0,
+    'pid_kd2': 0.0,
+    'pid_integral_limit_min2': 0.0,
+    'pid_integral_limit_max2': 0.0,
+    'pid_output_limit_min2': -80.0,
+    'pid_output_limit_max2': 80.0,
+    
+    'yellow_angular_z2': 11.0,
+    'yellow_linear_x2': 0.8,
+    'direct_angular_z2': 16.5,
+    'direct_linear_x2': 0.8,
+}
+
+
+
+
+
+
+
+
+
+
+
+
+def generate_launch_description():
+    # 获取包目录路径
+    package_name = 'my_racecar'  
+    
+    parameters = parametersd
+    
+    
+    return LaunchDescription([
+        # 启动 GetDistance 节点
+        Node(
+            package=package_name,
+            executable='get_distance',
+            name='get_distance',
+            output='screen',
+            parameters=[parameters],
+            remappings=[
+                ('distance', '/distance')
+            ]
+        ),
+        
+
+        #启动里程计节点
+     #   Node(
+     #       package='encoder_imu',
+     #       executable='imu_encoder_mix',
+     #       name='imu_encoder_mix',
+     #       output='screen',
+     #   ),
+
+
+
+        # 启动 GetFlag 节点
+        Node(
+            package=package_name,
+            executable='get_flag', 
+            name='get_flag',
+            output='screen',
+            parameters=[parameters],
+            remappings=[
+                ('/encoder_imu_odom', '/key1_odom'),  # 11-04：车上唯一的里程计话题（快捷键 1 起的 imu_encoder_mix）
+                ('flag', '/flag'),
+                ('traffic_light', '/traffic_light')
+            ]
+        ),
+        
+        Node(
+            package=package_name,  
+            executable='get_middle_point',  # 可执行文件名称
+            name='get_middle_point',
+            output='screen',
+        ),
+        
+        
+        # 启动 MoveControl 节点
+        Node(
+            package=package_name,
+            executable='move_control',
+            name='move_control',
+            output='screen',
+            parameters=[parameters],
+            remappings=[
+                ('flag', '/flag'),
+                ('middle_point', '/middle_point'),
+                ('car_cmd_vel', '/car_cmd_vel')
+            ]
+        )
+    ])

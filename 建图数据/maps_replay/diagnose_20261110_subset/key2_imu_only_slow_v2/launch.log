@@ -1,0 +1,12 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-10-19-02-12-907523-DESKTOP-7JE3QFM-9300
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\diagnose_20261110_subset\key2_imu_only_slow_v2；run_index=1；SLAM async；位姿来源 IMU 航向（无轮速）；去畸变 关
+[INFO] [python.exe-1]: process started with pid [9532]
+[INFO] [async_slam_toolbox_node.EXE-2]: process started with pid [29244]
+[INFO] [python.exe-3]: process started with pid [2924]
+[async_slam_toolbox_node.EXE-2] [INFO] [1794308533.399948200] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-2] [INFO] [1794308533.400209200] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.
+[async_slam_toolbox_node.EXE-2] Registering sensor: [Custom Described Lidar]
+[async_slam_toolbox_node.EXE-2] WARNING: Logging before InitGoogleLogging() is written to STDERR
+[async_slam_toolbox_node.EXE-2] W20261110 19:03:47.627841 29544 preprocessor.cc:67] Specified options.num_threads: 50 exceeds maximum available from the threading model Ceres was compiled with: 12.  Bounding to maximum number available.
+[ERROR] [async_slam_toolbox_node.EXE-2]: process has died [pid 29244, exit code 3221225725, cmd 'D:\ubuntu\slam\.pixi\envs\default\Library\lib\slam_toolbox\async_slam_toolbox_node.EXE --ros-args -r __node:=slam_toolbox --params-file C:\Users\lzc2\Desktop\my_racecar（复件）\mapping\config\mapper_native.yaml --params-file C:\Users\lzc2\AppData\Local\Temp\launch_params_mvydu5vu'].

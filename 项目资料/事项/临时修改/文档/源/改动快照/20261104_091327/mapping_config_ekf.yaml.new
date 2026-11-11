@@ -1,0 +1,51 @@
+# robot_localization ekf_node：轮速 + IMU 角速度融合（电脑端 -Odom ekf 模式用）
+# 输入由 mapping/scripts/ekf_input 处理过（时间换成电脑时钟、填协方差、帧名 odom_ekf/base_ekf）。
+# 输出 /odometry/filtered 在 launch 里 remap 成 /ekf_odom，再由 ekf_input 换回车上时间发 /ekf_odom_car。
+ekf_filter_node:
+  ros__parameters:
+    frequency: 50.0               # 与 /key1_odom 相同的 50 Hz
+    sensor_timeout: 0.2
+    two_d_mode: true              # 平面小车：z、roll、pitch 恒为 0
+    publish_tf: false             # TF 由 scan_tf_bridge 按扫描时间戳发，这里不发
+    print_diagnostics: false
+    odom_frame: odom_ekf
+    base_link_frame: base_ekf
+    world_frame: odom_ekf
+
+    # 状态顺序：x y z | roll pitch yaw | vx vy vz | vroll vpitch vyaw | ax ay az
+    odom0: /ekf/wheel
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,     # vx（轮速）、vy（=0，车不横移）
+                   false, false, false,
+                   false, false, false]
+    odom0_queue_size: 20
+    odom0_differential: false
+
+    imu0: /ekf/imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,       # 只用 vyaw（角速度 z）
+                  false, false, false]
+    imu0_queue_size: 50
+    imu0_differential: false
+    imu0_remove_gravitational_acceleration: false
+
+    # 过程噪声：vx 允许较快变化（3 m/s 加减速），航向角速度变化快（急弯）
+    # 注意每个数都要写成小数（0.0 不能写 0）：整数小数混在一个列表里，ekf_node 报 Failed to parse global arguments 直接退出
+    process_noise_covariance: [0.05, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.05, 0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.06, 0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.03, 0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.03, 0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.06, 0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.5,   0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.05,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.04, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.01, 0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.01, 0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.5,  0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.01, 0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.01, 0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.015]

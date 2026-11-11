@@ -1,0 +1,12 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-05-17-37-26-271792-DESKTOP-7JE3QFM-21548
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\1105_101953_vote；run_index=1；SLAM async；位姿来源 /key1_odom；去畸变 开
+[INFO] [python.exe-1]: process started with pid [21832]
+[INFO] [async_slam_toolbox_node.EXE-2]: process started with pid [28424]
+[INFO] [python.exe-3]: process started with pid [11180]
+[INFO] [python.exe-4]: process started with pid [27264]
+[async_slam_toolbox_node.EXE-2] [INFO] [1793871448.580217700] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-2] [INFO] [1793871448.580738700] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.
+[async_slam_toolbox_node.EXE-2] Registering sensor: [Custom Described Lidar]
+[async_slam_toolbox_node.EXE-2] WARNING: Logging before InitGoogleLogging() is written to STDERR
+[async_slam_toolbox_node.EXE-2] W20261105 17:40:42.537905 25192 preprocessor.cc:67] Specified options.num_threads: 50 exceeds maximum available from the threading model Ceres was compiled with: 12.  Bounding to maximum number available.

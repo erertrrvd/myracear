@@ -1,0 +1,59 @@
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /scan
+    use_map_saver: true
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+    resolution: 0.05
+    # 过滤移动目标：格子被击中的比例低于阈值就不算占据，被经过次数少于 min_pass_through 也不更新。
+    # 阈值太严会把细锥桶一起过滤掉。模拟实测（车速 1.5 m/s，12 个锥桶）：
+    #   0.35/4 只找回 2/12；0.20/3 找回 6/12 且走动物体不留痕迹；0.10/2 找回 7/12 但开始留痕迹。
+    # 所以取 0.20/3。仍嫌锥桶少/小：建图那一圈开慢一点（0.5 m/s 时 6/6 锥桶都能找回）。
+    min_pass_through: 3
+    occupancy_threshold: 0.20
+    # 室内赛场不需要 25 m：远处点噪声大，且无回波的射线会穿墙擦出条纹
+    max_laser_range: 12.0
+    minimum_time_interval: 0.05
+    # WiFi 抖动时 TF 比扫描晚到，扩大队列与等待，避免 Message Filter 队列满而丢帧
+    throttle_scans: 1
+    scan_queue_size: 300
+    message_filter_queue_size: 300
+    queue_size: 300
+    transform_publish_period: 0.02
+    map_update_interval: 0.5
+    tf_buffer_duration: 30.0
+    transform_timeout: 1.0
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.20
+    minimum_travel_heading: 0.15
+    scan_buffer_size: 30
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.10
+    # 车速快：相邻两帧间车已前进 0.2 m 以上，扩大扫描匹配的搜索范围（默认 0.5 m / ±20°）
+    correlation_search_space_dimension: 1.0
+    correlation_search_space_resolution: 0.01
+    coarse_search_angle_offset: 0.5
+    link_scan_maximum_distance: 3.0
+    # 里程计（尤其朝向）第二圈开始漂：匹配时少惩罚“偏离里程计”，更相信激光。
+    # 惩罚的方差越大惩罚越小；两个 minimum 是惩罚的下限，调低 = 允许离里程计更远。
+    distance_variance_penalty: 1.0
+    angle_variance_penalty: 1.8
+    minimum_distance_penalty: 0.3
+    minimum_angle_penalty: 0.6
+    # 回环：第二圈回到第一圈走过的地方时，把整条轨迹拉回去（默认 4 m / 0.35 / 0.45）。
+    # 锥桶场地特征稀疏，响应值本来就低，所以阈值略放宽、搜索范围放大。
+    loop_search_maximum_distance: 6.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.30
+    loop_match_minimum_response_fine: 0.40

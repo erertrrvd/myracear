@@ -1,0 +1,208 @@
+#!/usr/bin/python3
+"""One-shot, fail-closed readiness check before starting fixed-route control."""
+import argparse
+import json
+import math
+import sys
+import time
+from pathlib import Path
+
+import rclpy
+from nav_msgs.msg import OccupancyGrid
+from rclpy.duration import Duration
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time
+from sensor_msgs.msg import LaserScan
+from tf2_ros import Buffer, TransformListener
+
+
+def angle_distance(a, b):
+    return abs(math.atan2(math.sin(a - b), math.cos(a - b)))
+
+
+class Ready(Node):
+    def __init__(self, args):
+        super().__init__('mapping_start_check')
+        self.args = args
+        self.scan = None
+        self.grid = None
+        self.last_reason = '等待 /scan 与 /map'
+        self.previous_occupied = 0
+        self.old_grid = None
+        if args.run_index > 1:
+            prior = Path(args.map_dir) / f'run{args.run_index - 1}' / 'complete.json'
+            meta = json.loads(prior.read_text())
+            self.previous_occupied = meta['occupied_cells']
+            self.old_grid = OccupancyGrid()
+            self.old_grid.info.width = meta['map_width']
+            self.old_grid.info.height = meta['map_height']
+            self.old_grid.info.resolution = meta['map_resolution']
+            self.old_grid.info.origin.position.x = meta['map_origin']['x']
+            self.old_grid.info.origin.position.y = meta['map_origin']['y']
+            yaw = meta['map_origin']['yaw']
+            self.old_grid.info.origin.orientation.z = math.sin(yaw / 2)
+            self.old_grid.info.origin.orientation.w = math.cos(yaw / 2)
+            raw = (prior.parent / 'map.raw').read_bytes()
+            if len(raw) != meta['map_width'] * meta['map_height']:
+                raise RuntimeError('旧地图栅格快照尺寸不匹配')
+            self.old_grid.data = [v if v < 128 else v - 256 for v in raw]
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer, self)
+        self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+        map_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, map_qos)
+
+    def on_scan(self, msg):
+        self.scan = msg
+
+    def on_map(self, msg):
+        self.grid = msg
+
+    def check(self):
+        scan, grid = self.scan, self.grid
+        if scan is None:
+            self.last_reason = '等待 /scan'
+            return None
+        if grid is None:
+            self.last_reason = '等待 /map'
+            return None
+        if scan.header.frame_id != self.args.laser_frame:
+            self.last_reason = f'扫描坐标系为 {scan.header.frame_id}，预期 {self.args.laser_frame}'
+            return None
+        stamp = Time.from_msg(scan.header.stamp)
+        if stamp.nanoseconds == 0 or (self.get_clock().now() - stamp).nanoseconds > 2_000_000_000:
+            self.last_reason = '/scan 时间戳过期或为零'
+            return None
+        occupied = sum(v >= 65 for v in grid.data)
+        min_occupied = max(20, int(self.previous_occupied * 0.4))
+        if grid.info.width * grid.info.height < 1000 or occupied < min_occupied:
+            self.last_reason = f'地图尚未加载或障碍不足：{occupied}/{min_occupied}'
+            return None
+        try:
+            tf = self.buffer.lookup_transform('map', scan.header.frame_id, stamp,
+                                              timeout=Duration(seconds=0.1))
+            base = self.buffer.lookup_transform('map', 'base_footprint', stamp,
+                                                timeout=Duration(seconds=0.1))
+        except Exception as exc:
+            self.last_reason = f'TF 不完整：{exc}'
+            return None
+        bp = base.transform.translation
+        bq = base.transform.rotation
+        byaw = math.atan2(2 * (bq.w * bq.z + bq.x * bq.y),
+                          1 - 2 * (bq.y * bq.y + bq.z * bq.z))
+        if self.args.run_index > 1:
+            if math.hypot(bp.x - self.args.start_x, bp.y - self.args.start_y) > self.args.start_radius:
+                self.last_reason = '定位位姿不在起点允许范围'
+                return None
+            if angle_distance(byaw, self.args.start_yaw) > self.args.start_yaw_tolerance:
+                self.last_reason = '定位航向不在起点允许范围'
+                return None
+            score = self.match_score(scan, self.old_grid, tf.transform)
+            if score < self.args.min_match_score:
+                self.last_reason = f'扫描与旧地图吻合不足：{score:.2f} < {self.args.min_match_score:.2f}'
+                return None
+        else:
+            score = 0.0
+        self.last_reason = '准备完成'
+        return (bp.x, bp.y, byaw, occupied, score)
+
+    @staticmethod
+    def match_score(scan, grid, tf):
+        q = tf.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
+                         1 - 2 * (q.y * q.y + q.z * q.z))
+        oq = grid.info.origin.orientation
+        oyaw = math.atan2(2 * (oq.w * oq.z + oq.x * oq.y),
+                          1 - 2 * (oq.y * oq.y + oq.z * oq.z))
+        cy, sin_yaw = math.cos(yaw), math.sin(yaw)
+        co, so = math.cos(oyaw), math.sin(oyaw)
+        ox, oy = grid.info.origin.position.x, grid.info.origin.position.y
+        width, height, res = grid.info.width, grid.info.height, grid.info.resolution
+        considered = matched = 0
+        step = max(1, len(scan.ranges) // 120)
+        for i in range(0, len(scan.ranges), step):
+            r = scan.ranges[i]
+            if not math.isfinite(r) or not scan.range_min < r < scan.range_max:
+                continue
+            a = scan.angle_min + i * scan.angle_increment
+            sx, scan_y = r * math.cos(a), r * math.sin(a)
+            mx = tf.translation.x + cy * sx - sin_yaw * scan_y
+            my = tf.translation.y + sin_yaw * sx + cy * scan_y
+            dx, dy = mx - ox, my - oy
+            gx, gy = int((co * dx + so * dy) / res), int((-so * dx + co * dy) / res)
+            if not (0 <= gx < width and 0 <= gy < height):
+                continue
+            considered += 1
+            radius = max(1, math.ceil(0.15 / res))
+            if any(grid.data[yy * width + xx] >= 65
+                   for yy in range(max(0, gy-radius), min(height, gy+radius+1))
+                   for xx in range(max(0, gx-radius), min(width, gx+radius+1))):
+                matched += 1
+        return matched / considered if considered >= 20 else 0.0
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument('--run-index', type=int, required=True)
+    p.add_argument('--map-dir', required=True)
+    p.add_argument('--laser-frame', required=True)
+    p.add_argument('--start-x', type=float, required=True)
+    p.add_argument('--start-y', type=float, required=True)
+    p.add_argument('--start-yaw', type=float, required=True)
+    p.add_argument('--start-radius', type=float, required=True)
+    p.add_argument('--start-yaw-tolerance', type=float, required=True)
+    p.add_argument('--min-match-score', type=float, required=True)
+    p.add_argument('--timeout', type=float, default=60.0)
+    return p.parse_known_args()[0]
+
+
+def main():
+    args = parse_args()
+    rclpy.init()
+    node = Ready(args)
+    deadline = time.monotonic() + args.timeout
+    good = 0
+    last_pose = None
+    last_log = 0
+    last_scan_ns = None
+    try:
+        while time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.2)
+            scan_ns = (node.scan.header.stamp.sec * 1_000_000_000 +
+                       node.scan.header.stamp.nanosec) if node.scan else None
+            if scan_ns is None or scan_ns == last_scan_ns:
+                if time.monotonic() - last_log > 5:
+                    print(f'建图起跑检查：{node.last_reason}', flush=True)
+                    last_log = time.monotonic()
+                continue
+            last_scan_ns = scan_ns
+            result = node.check()
+            if result is not None:
+                pose = result[:3]
+                stable = last_pose is None or (
+                    math.hypot(pose[0]-last_pose[0], pose[1]-last_pose[1]) < 0.08 and
+                    angle_distance(pose[2], last_pose[2]) < 0.08)
+                good = good + 1 if stable else 1
+                last_pose = pose
+                if good >= 5:
+                    print(f'建图起跑检查通过：地图障碍 {result[3]}，旧图匹配 {result[4]:.2f}', flush=True)
+                    return 0
+            else:
+                good = 0
+            if time.monotonic() - last_log > 5:
+                print(f'建图起跑检查：{node.last_reason}', flush=True)
+                last_log = time.monotonic()
+        print(f'建图起跑检查超时：{node.last_reason}', file=sys.stderr, flush=True)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

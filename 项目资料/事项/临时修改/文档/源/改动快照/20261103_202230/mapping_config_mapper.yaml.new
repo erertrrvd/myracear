@@ -1,0 +1,62 @@
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /scan
+    use_map_saver: true
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+    resolution: 0.05
+    # 过滤移动目标：格子被击中的比例低于阈值就不算占据，被经过次数少于 min_pass_through 也不更新。
+    # 阈值太严会把细锥桶一起过滤掉。模拟实测（车速 1.5 m/s，12 个锥桶）：
+    #   0.35/4 只找回 2/12；0.20/3 找回 6/12 且走动物体不留痕迹；0.10/2 找回 7/12 但开始留痕迹。
+    # 所以取 0.20/3。仍嫌锥桶少/小：建图那一圈开慢一点（0.5 m/s 时 6/6 锥桶都能找回）。
+    min_pass_through: 3
+    occupancy_threshold: 0.20
+    # 室内赛场不需要 25 m：远处点噪声大，且无回波的射线会穿墙擦出条纹
+    max_laser_range: 12.0
+    minimum_time_interval: 0.05
+    # WiFi 抖动时 TF 比扫描晚到，扩大队列与等待，避免 Message Filter 队列满而丢帧
+    throttle_scans: 1
+    scan_queue_size: 300
+    message_filter_queue_size: 300
+    queue_size: 300
+    transform_publish_period: 0.02
+    map_update_interval: 0.5
+    tf_buffer_duration: 30.0
+    transform_timeout: 1.0
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.20
+    minimum_travel_heading: 0.15
+    scan_buffer_size: 30
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.10
+    # 扫描匹配以里程计预测位姿为中心搜索（不是以上一帧为中心），搜索范围只需盖住里程计误差。
+    # 11-03 操场：锥桶等间距（约 1.3 m）、空地无墙，旧值（±0.5 m / ±28.6°）+ 少惩罚偏离里程计时，
+    # 匹配会把锥桶对错、朝向一次偏几十度（20:02 那趟开车 5 s 内 SLAM 与里程计朝向差 67°），
+    # 同一批锥桶被画成两份。改回 slam_toolbox 默认：±0.25 m（小于半个锥桶间距）/ ±20°。
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    coarse_search_angle_offset: 0.349
+    link_scan_maximum_distance: 3.0
+    # 偏离里程计的惩罚：改回默认（旧值 1.0 / 1.8 / 0.3 / 0.6 更信激光，空地里激光约束弱，反而被带偏）。
+    # 惩罚的方差越大惩罚越小；两个 minimum 是惩罚的下限，调低 = 允许离里程计更远。
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    minimum_distance_penalty: 0.5
+    minimum_angle_penalty: 0.9
+    # 回环：第二圈回到第一圈走过的地方时，把整条轨迹拉回去。
+    # 锥桶排列重复，阈值放宽容易接错回环（整段地图突然跳），改回默认阈值，搜索范围 4 m。
+    loop_search_maximum_distance: 4.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45

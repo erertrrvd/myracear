@@ -1,0 +1,18 @@
+[Unit]
+Description=Fix system time on boot (RTC not working)
+Documentation=https://github.com/your/repo
+# 文件系统就绪后再跑（要读文件 mtime）
+After=local-fs.target
+Before=multi-user.target
+# 网络无关，所以不依赖 network
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fix-time-on-boot.sh
+RemainAfterExit=yes
+# 需要 root 权限才能 date -s
+User=root
+
+[Install]
+WantedBy=multi-user.target

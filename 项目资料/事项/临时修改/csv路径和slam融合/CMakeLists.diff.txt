@@ -1,0 +1,12 @@
+﻿diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3c5ffb3..cbf0e92 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -161,6 +161,7 @@ install(PROGRAMS
+   mapping/scripts/mapping_status_logger
+   mapping/scripts/save_mapping
+   mapping/scripts/scan_tf_bridge
++  mapping/scripts/view_path_on_map
+   DESTINATION lib/${PROJECT_NAME}
+ )
+ 

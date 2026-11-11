@@ -1,0 +1,154 @@
+#!/usr/bin/python3
+"""建图时定期自动保存一份地图，防止忘了保存或窗口意外关闭导致整趟白建。
+
+用法：map_autosave <map_dir> [period_s=60]
+  每隔 period_s 秒，若 /map 有变化，就把当前地图写到 <map_dir>/autosave/：
+    map.pgm / map.yaml / info.json     （每次，原子替换，随时可用 rviz 或 view_csv 查看）
+    map.posegraph / map.data           （每 5 次一份，用于以后继续建图；写入失败不影响图片）
+  退出（Ctrl+C）时再存一次最终图片。
+
+它只是保险，不替代正式保存：正式保存仍用 save_mapping（写 run<N>/，带校验，不覆盖）。
+autosave 目录每次都会被覆盖，所以不要把它当作"第几趟"的正式结果。
+"""
+import json
+import math
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import rclpy
+from nav_msgs.msg import OccupancyGrid
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
+try:
+    from slam_toolbox.srv import SerializePoseGraph
+except Exception:          # slam_toolbox 的 Python 消息不可用时只存图片
+    SerializePoseGraph = None
+
+GRAPH_EVERY = 5            # 每几次保存带一次位姿图
+
+
+def write_map(grid, out_dir):
+    """把 OccupancyGrid 写成 map.pgm + map.yaml（先写 .tmp 再原子替换）。"""
+    w, h = grid.info.width, grid.info.height
+    if w <= 0 or h <= 0 or len(grid.data) != w * h:
+        raise RuntimeError('地图栅格尺寸无效')
+    q = grid.info.origin.orientation
+    yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+    pixels = bytearray()
+    for y in range(h - 1, -1, -1):
+        row = y * w
+        for x in range(w):
+            v = grid.data[row + x]
+            pixels.append(205 if v < 0 else round(254 * (1 - v / 100)))
+    pgm, yml = out_dir / 'map.pgm', out_dir / 'map.yaml'
+    with open(f'{pgm}.tmp', 'wb') as f:
+        f.write(f'P5\n{w} {h}\n255\n'.encode('ascii'))
+        f.write(pixels)
+    o = grid.info.origin.position
+    Path(f'{yml}.tmp').write_text(
+        f'image: map.pgm\nresolution: {grid.info.resolution:.9g}\n'
+        f'origin: [{o.x:.9g}, {o.y:.9g}, {yaw:.9g}]\n'
+        'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n', encoding='utf-8')
+    os.replace(f'{pgm}.tmp', pgm)
+    os.replace(f'{yml}.tmp', yml)
+
+
+class Autosave(Node):
+    def __init__(self, root, period):
+        super().__init__('map_autosave')
+        self.dir = root / 'autosave'
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.grid = None
+        self.last_sig = None
+        self.count = 0
+        self.pending_graph = False
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                         reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, qos)
+        self.client = (self.create_client(SerializePoseGraph, '/slam_toolbox/serialize_map')
+                       if SerializePoseGraph else None)
+        self.create_timer(period, self.save)
+        self.get_logger().info(f'自动保存已开启：每 {period:.0f} 秒 -> {self.dir}（只是保险，正式保存仍用 save_mapping）')
+
+    def on_map(self, msg):
+        self.grid = msg
+
+    def signature(self, g):
+        # 地图有没有变：尺寸 + 已知格数 + 占据格数（够用且很快）
+        known = sum(1 for v in g.data if v >= 0)
+        occ = sum(1 for v in g.data if v >= 65)
+        return (g.info.width, g.info.height, known, occ), known, occ
+
+    def save(self, final=False):
+        g = self.grid
+        if g is None:
+            return
+        sig, known, occ = self.signature(g)
+        if sig == self.last_sig and not final:
+            return
+        try:
+            write_map(g, self.dir)
+        except Exception as exc:                       # 保险节点绝不能因为写盘失败而退出
+            self.get_logger().error(f'自动保存失败：{exc}')
+            return
+        self.last_sig = sig
+        self.count += 1
+        info = {'saved_at_utc': datetime.now(timezone.utc).isoformat(),
+                'save_count': self.count, 'known_cells': known, 'occupied_cells': occ,
+                'width': g.info.width, 'height': g.info.height,
+                'resolution': g.info.resolution, 'final': final}
+        (self.dir / 'info.json').write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding='utf-8')
+        self.get_logger().info(f'自动保存 #{self.count}：已知 {known} 格，障碍 {occ} 格 -> {self.dir}')
+        if (not final and self.client is not None and self.count % GRAPH_EVERY == 1
+                and not self.pending_graph and self.client.service_is_ready()):
+            self.save_graph()
+
+    def save_graph(self):
+        tmp = self.dir / '.graph_tmp'
+        tmp.mkdir(exist_ok=True)
+        req = SerializePoseGraph.Request()
+        req.filename = str(tmp / 'map')
+        self.pending_graph = True
+        fut = self.client.call_async(req)
+
+        def done(f):
+            self.pending_graph = False
+            try:
+                ok = f.result().result == SerializePoseGraph.Response.RESULT_SUCCESS
+                if ok:
+                    for name in ('map.posegraph', 'map.data'):
+                        if (tmp / name).is_file():
+                            os.replace(tmp / name, self.dir / name)
+                    self.get_logger().info('位姿图已自动保存')
+                else:
+                    self.get_logger().warn('位姿图自动保存失败（图片已保存，不影响查看）')
+            except Exception as exc:
+                self.get_logger().warn(f'位姿图自动保存异常：{exc}')
+
+        fut.add_done_callback(done)
+
+
+def main():
+    root = Path(sys.argv[1]).expanduser().resolve()
+    period = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
+    rclpy.init()
+    node = Autosave(root, max(period, 5.0))
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            node.save(final=True)
+        except Exception:
+            pass
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

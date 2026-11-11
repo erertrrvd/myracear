@@ -1,0 +1,193 @@
+﻿# Windows 电脑端分布式建图一键脚本（小车发 /scan + /encoder_imu_odom，电脑用 SLAM Toolbox 建图）。
+# 与 Linux 版同一套逻辑：scan_tf_bridge（重采样 720 点 + 按扫描时间戳发 TF）+ slam_toolbox + rviz2。
+#
+#   .\run_slam_windows.ps1                        启动建图（地图目录自动按时间新建）
+#   .\run_slam_windows.ps1 -Check                 联机检查：看有没有收到小车的 /scan、里程计
+#   .\run_slam_windows.ps1 -Save                  保存地图（建图窗口保持运行，另开窗口执行）
+#   .\run_slam_windows.ps1 -NoOdom                没有里程计，纯激光匹配
+#   .\run_slam_windows.ps1 -Domain 42 -MapDir D:/ubuntu/slam/maps/test1 -RunIndex 1
+#   .\run_slam_windows.ps1 -AllNics               不限定网卡（一般不要用，见下）
+#   .\run_slam_windows.ps1 -Mode native          原生建图：不设置过滤阈值，用 slam_toolbox 默认值（锥桶最全，走动的人会留痕迹）
+#   .\run_slam_windows.ps1 -Mode filtered        带阈值建图（默认）：occupancy_threshold 0.20 / min_pass_through 3
+#   .\run_slam_windows.ps1 -AutoSave 30           每 30 秒自动存一份到 <地图目录>\autosave\（默认 60，0 = 关；只是保险，正式保存仍要 -Save）
+#
+# 网卡：电脑有多块网卡（手机共享、VPN/代理隧道、VMware 虚拟网卡）时，DDS 的发现流量会走错网卡，
+# 表现为 rviz 里没有点云、地图宽高为 0。脚本默认自动找出“通往小车的那块网卡”的 IP，
+# 生成只走这块网卡的 Fast DDS 配置（WiFi IP 变了也不用手改）。
+param(
+    [string]$MapDir = '',
+    [int]$RunIndex = 1,
+    [int]$Domain = 42,
+    [string]$CarIp = '192.168.5.100',
+    [double]$AutoSave = 60,
+    [ValidateSet('filtered', 'native')][string]$Mode = 'filtered',
+    [switch]$NoOdom, [switch]$NoRviz, [switch]$AllNics,
+    [switch]$Save, [switch]$Check
+)
+$ErrorActionPreference = 'Stop'
+$proj = 'C:\Users\lzc2\Desktop\my_racecar（复件）'
+$slam = 'D:\ubuntu\slam'
+Set-Location $slam
+
+$env:ROS_DOMAIN_ID = "$Domain"          # 必须与小车一致（实际是 42）
+$env:ROS_LOCALHOST_ONLY = '0'           # 跨机必须为 0
+
+if (-not $AllNics) {
+    # 找“和小车在同一网段”的网卡（而不是看路由：没连小车 WiFi 时，默认路由会把流量扔进代理隧道）
+    $carBytes = ([System.Net.IPAddress]::Parse($CarIp)).GetAddressBytes()
+    $sameNet = {
+        param($ip, $prefix)
+        $b = ([System.Net.IPAddress]::Parse($ip)).GetAddressBytes()
+        $bits = $prefix
+        for ($i = 0; $i -lt 4; $i++) {
+            $m = [Math]::Min(8, [Math]::Max(0, $bits)); $bits -= 8
+            $mask = if ($m -eq 0) { 0 } else { (0xFF -shl (8 - $m)) -band 0xFF }
+            if (($b[$i] -band $mask) -ne ($carBytes[$i] -band $mask)) { return $false }
+        }
+        return $true
+    }
+    $addrs = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254*' }
+    $hit = $addrs | Where-Object { & $sameNet $_.IPAddress $_.PrefixLength } | Select-Object -First 1
+    if (-not $hit) {
+        Write-Host ''
+        Write-Host "!! 电脑没有和小车 $CarIp 同网段的网卡 —— 没连小车 WiFi。" -ForegroundColor Red
+        Write-Host '   当前网卡:' -ForegroundColor Yellow
+        $addrs | ForEach-Object { Write-Host ("   {0,-32} {1}/{2}" -f $_.InterfaceAlias, $_.IPAddress, $_.PrefixLength) }
+        Write-Host '   请把电脑连到小车的 WiFi（网段 192.168.5.x），再重新运行。' -ForegroundColor Yellow
+        exit 1
+    }
+    $route = [pscustomobject]@{ InterfaceAlias = $hit.InterfaceAlias; IPAddress = $hit.IPAddress }
+    $pcIp = $route.IPAddress
+    $xml = @"
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>car_nic_udp</transport_id>
+      <type>UDPv4</type>
+      <interfaceWhiteList><address>$pcIp</address><address>127.0.0.1</address></interfaceWhiteList>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="car_nic_only" is_default_profile="true">
+    <rtps><useBuiltinTransports>false</useBuiltinTransports><userTransports><transport_id>car_nic_udp</transport_id></userTransports></rtps>
+  </participant>
+</profiles>
+"@
+    $xmlPath = "$slam\fastdds_car_nic.xml"
+    [IO.File]::WriteAllText($xmlPath, $xml, (New-Object System.Text.UTF8Encoding($false)))
+    $env:FASTRTPS_DEFAULT_PROFILES_FILE = $xmlPath
+    Write-Host "DDS 只走网卡 $($route.InterfaceAlias) ($pcIp)，小车 $CarIp，ROS_DOMAIN_ID=$Domain"
+}
+
+if ($Check) {
+    # 6 秒内列出发现的小车节点/话题，并尝试收一帧 /scan（不会一直卡住）
+    $probe = @'
+import rclpy, time
+from collections import Counter
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+rclpy.init(); n = Node('slam_check'); got = {'scan': 0, 'odom': 0}; first = {}
+def on_scan(m):
+    got['scan'] += 1; first.setdefault('scan', len(m.ranges))
+def on_odom(m):
+    got['odom'] += 1; first.setdefault('odom', round(m.pose.pose.position.x, 3))
+n.create_subscription(LaserScan, '/scan', on_scan, qos_profile_sensor_data)
+n.create_subscription(Odometry, '/encoder_imu_odom', on_odom, 10)
+t0 = time.time()
+while time.time() - t0 < 8: rclpy.spin_once(n, timeout_sec=0.2)
+dt = time.time() - t0
+names = [x for x in n.get_node_names() if x != 'slam_check']
+dup = [k for k, c in Counter(names).items() if c > 1]
+print('发现的节点:', sorted(set(names)) if names else '无（DDS 没通）')
+if dup:
+    print('!! 有重名节点（同一个驱动被启动了多次，数据会重复，影响里程计融合）:', dup)
+    print('   到小车上查残留: ps -eo pid,ppid,etime,args | grep -E "talker|lslidar|encoder_node" | grep -v grep')
+print('/scan 发布者:', n.count_publishers('/scan'), ' 8 秒内收到', got['scan'], '帧 (约 %.1f Hz)' % (got['scan'] / dt),
+      '' if got['scan'] else '  !! 没有收到')
+print('/encoder_imu_odom 发布者:', n.count_publishers('/encoder_imu_odom'), ' 8 秒内收到', got['odom'], '条 (约 %.1f Hz)' % (got['odom'] / dt),
+      '' if got['odom'] else '  !! 没有收到：没有里程计时地图几乎不会增长，请先启动小车的 imu_encoder_mix，或用 -NoOdom')
+print('/map 发布者:', n.count_publishers('/map'), '（建图前应为 0；不为 0 说明车上或别处已有 SLAM/地图服务在发 /map，会冲突）')
+'@
+    $probePath = "$env:TEMP\slam_check.py"
+    [IO.File]::WriteAllText($probePath, $probe, (New-Object System.Text.UTF8Encoding($false)))
+    $env:PYTHONIOENCODING = 'utf-8'
+    pixi run --frozen python $probePath
+    return
+}
+
+if (-not $MapDir) {
+    if ($Save) {   # 保存：取 maps 下最新的目录
+        $latest = Get-ChildItem "$slam\maps" -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $latest) { throw '找不到地图目录，请用 -MapDir 指定' }
+        $MapDir = $latest.FullName
+    } else {
+        $suffix = if ($Mode -eq 'native') { '_native' } else { '_filtered' }
+        $MapDir = "$slam\maps\run_" + (Get-Date -Format 'yyyyMMdd_HHmm') + $suffix
+    }
+}
+$mapDirFs = $MapDir.Replace([string][char]92, '/')
+
+if ($Save) {
+    Write-Host "保存到 $MapDir (run$RunIndex) ..."
+    pixi run --frozen python "$proj\mapping\scripts\save_mapping" --run-index $RunIndex --map-dir $mapDirFs
+    return
+}
+
+$mapperCfg = if ($Mode -eq 'native') { "$proj\mapping\config\mapper_native.yaml" } else { "$proj\mapping\config\mapper.yaml" }
+if (-not (Test-Path $mapperCfg)) { Write-Host "!! 找不到参数文件：$mapperCfg" -ForegroundColor Red; exit 1 }
+$useOdom = if ($NoOdom) { 'false' } else { 'true' }
+$rviz    = if ($NoRviz) { 'false' } else { 'true' }
+$autoSaveArg = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0###}', $AutoSave)
+Write-Host "建图：map_dir=$MapDir  run_index=$RunIndex  domain=$Domain  use_odom=$useOdom  模式=$Mode  自动保存=$autoSaveArg 秒"
+Write-Host "提醒：建完图后另开窗口运行  .\run_slam_windows.bat -Save  并看到“已完整保存”再关本窗口。"
+$null = New-Item -ItemType Directory -Force -Path $MapDir
+$liveLog = "$MapDir\.run$RunIndex-live.jsonl"
+$launchArgs = @('run','--frozen','ros2','launch',"`"$proj\mapping\launch\distributed_mapping_pc_windows.launch.py`"",
+                "map_dir:=$mapDirFs","run_index:=$RunIndex","use_odom:=$useOdom","rviz:=$rviz","autosave_period:=$autoSaveArg","mapper_config:=$mapperCfg")
+$launchProc = Start-Process pixi -ArgumentList $launchArgs -NoNewWindow -PassThru
+
+# 前台每 5 秒读一次状态日志：打印进度和告警（Python 节点的告警不会实时出现在 launch 输出里，所以用日志文件）
+$lastShown = Get-Date; $prevKnown = -1; $stallWarned = $false
+try {
+    while (-not $launchProc.HasExited) {
+        Start-Sleep -Seconds 5
+        if (-not (Test-Path $liveLog)) { continue }
+        $line = Get-Content $liveLog -Tail 1 -ErrorAction SilentlyContinue
+        if (-not $line) { continue }
+        try { $st = $line | ConvertFrom-Json } catch { continue }
+        if ($st.event -eq 'stop') { continue }
+        if (((Get-Date) - $lastShown).TotalSeconds -ge 15) {
+            $lastShown = Get-Date
+            Write-Host ("[监控] 扫描 {0} 帧 | 里程计 {1} 条 | 地图已知 {2} 格 | 障碍 {3} 格" -f $st.scans, $st.odometry_messages, $st.known_cells, $st.occupied_cells) -ForegroundColor Cyan
+        }
+        if ($useOdom -eq 'true' -and $st.scans -gt 100 -and $st.odometry_messages -eq 0) {
+            Write-Host '[监控] !! 一条里程计都没收到：位姿一直是原点，地图几乎不会增长。检查小车 imu_encoder_mix，或用 -NoOdom 重来。' -ForegroundColor Red
+        } elseif ($st.event -eq 'stalled' -and -not $stallWarned) {
+            $stallWarned = $true
+            Write-Host '[监控] !! 地图 30 秒没增长（车没动，或 SLAM 没跟上）。检查里程计、推车速度。' -ForegroundColor Yellow
+        } elseif ($st.known_cells -gt $prevKnown -and $prevKnown -ge 0) {
+            $stallWarned = $false
+        }
+        $prevKnown = $st.known_cells
+    }
+} finally {
+    if ($launchProc -and -not $launchProc.HasExited) { $null = $launchProc.WaitForExit(15000) }
+}
+
+# 建图窗口结束后检查：正式保存了吗？
+$saved = Test-Path "$MapDir\run$RunIndex\complete.json"
+if ($saved) {
+    Write-Host "已正式保存：$MapDir\run$RunIndex" -ForegroundColor Green
+} else {
+    Write-Host ''
+    Write-Host "!! 本趟没有正式保存（$MapDir\run$RunIndex 不存在）。" -ForegroundColor Red
+    if (Test-Path "$MapDir\autosave\map.yaml") {
+        $info = Get-Content "$MapDir\autosave\info.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+        Write-Host "   但有自动保存的备份：$MapDir\autosave\map.yaml  （障碍 $($info.occupied_cells) 格，保存于 $($info.saved_at_utc)）" -ForegroundColor Yellow
+        Write-Host "   查看： .\view_csv.bat -Map `"$MapDir\autosave\map.yaml`"" -ForegroundColor Yellow
+    } else {
+        Write-Host '   也没有自动保存的备份（地图可能一直是空的）。' -ForegroundColor Yellow
+    }
+}

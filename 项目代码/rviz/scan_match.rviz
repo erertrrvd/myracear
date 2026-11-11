@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<!--
+  scan_match.rviz —— scan_match 专用 RViz 预设
+
+  Fixed Frame 已设为 laser_link（和 scan_match 默认的 frame_id 一致）
+  已配好 4 个显示项：
+      PointCloud   参考点云（蓝色）
+      PointCloud   当前点云（绿色，变换后）
+      MarkerArray  坐标系箭头 + 结果文字
+      Grid         地面网格（帮助判断尺度）
+
+  ⚠️ 如果你的雷达 frame_id 不是 laser_link：
+      启动时用 frame_id:=实际名字，RViz 里也要把 Fixed Frame 改成同一个
+      或者用 frame_id:=odom 配合 scan_match 的 frame_id:=odom
+-->
+<rviz config_version="1">
+  <Rviz>
+    <!-- ================= 全局设置 ================= -->
+    <Global Options>
+      <!-- ★ 关键：固定坐标系。和 scan_match 的 frame_id 必须一致 -->
+      <Fixed Frame>laser_link</Fixed Frame>
+      <Background Color>25; 28; 33</Background Color>
+      <Frame Rate>30</Frame Rate>
+      <Default Light>true</Default Light>
+    </Global Options>
+
+    <Displays>
+      <!-- ========== ① 地面网格（判断尺度用）========== -->
+      <Grid>
+        <Class>rviz_default_plugins/Grid</Class>
+        <Name>Grid</Name>
+        <Enabled>true</Enabled>
+        <Cell Size>1</Cell Size>
+        <Plane Cell Count>30</Plane Cell Count>
+        <Color>90; 95; 105</Color>
+        <Alpha>0.4</Alpha>
+        <Line Style>Lines</Line Style>
+        <Plane>XY</Plane>
+        <Offset>
+          <X>0</X><Y>0</Y><Z>0</Z>
+        </Offset>
+      </Grid>
+
+      <!-- ========== ② 参考点云（蓝色）========== -->
+      <PointCloud>
+        <Class>rviz_default_plugins/PointCloud</Class>
+        <Name>参考点云 ref_cloud</Name>
+        <Enabled>true</Enabled>
+        <Topic>
+          <Value>/scan_match/markers</Value>
+          <Depth>10</Depth>
+          <Durability Policy>Transient Local</Durability Policy>
+          <History Policy>Keep Last</History Policy>
+          <Reliability Policy>Reliable</Reliability Policy>
+        </Topic>
+      </PointCloud>
+
+      <!-- ========== ③ 匹配结果 Marker（箭头 + 文字）========== -->
+      <MarkerArray>
+        <Class>rviz_default_plugins/MarkerArray</Class>
+        <Name>坐标系与结果 markers</Name>
+        <Enabled>true</Enabled>
+        <Topic>
+          <Value>/scan_match/markers</Value>
+          <Depth>10</Depth>
+          <Durability Policy>Transient Local</Durability Policy>
+          <History Policy>Keep Last</History Policy>
+          <Reliability Policy>Reliable</Reliability Policy>
+        </Topic>
+      </MarkerArray>
+    </Displays>
+
+    <!-- ================= 工具 ================= -->
+    <Tools>
+      <Tool>-1; 87; 100</Tool>
+    </Tools>
+
+    <!-- ================= 视角 =================
+         Target Frame = laser_link，从正上方俯视
+         Distance 6m，能同时看到原点、坐标轴和 3~5 米外的点云
+    -->
+    <Views>
+      <Current View Class="rviz_default_plugins/Orbit" Name="Current View">
+        <Target Frame>laser_link</Target Frame>
+        <Distance>6</Distance>
+        <Focal Point>
+          <X>0</X><Y>0</Y><Z>0</Z>
+        </Focal Point>
+        <Yaw>0</Yaw>
+        <Pitch>1.5708</Pitch>       <!-- 90° = 正上方俯视 -->
+      </Current View>
+    </Views>
+
+    <Window Geometry>
+      <X>60</X><Y>60</Y>
+      <Width>1280</Width><Height>800</Height>
+    </Window Geometry>
+
+    <Panels>
+      <Panel>
+        <Class>rviz_common/Displays</Class>
+        <Name>Displays</Name>
+      </Panel>
+      <Panel>
+        <Class>rviz_common/Views</Class>
+        <Name>Views</Name>
+      </Panel>
+    </Panels>
+  </Rviz>
+</rviz>

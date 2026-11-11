@@ -1,0 +1,10 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-04-08-46-19-679636-DESKTOP-7JE3QFM-10684
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\test_1022；run_index=1；SLAM async；位姿来源 /key1_odom；去畸变 开
+[INFO] [python.exe-1]: process started with pid [8272]
+[INFO] [async_slam_toolbox_node.EXE-2]: process started with pid [26036]
+[INFO] [python.exe-3]: process started with pid [25444]
+[async_slam_toolbox_node.EXE-2] [INFO] [1793753181.599452200] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-2] [INFO] [1793753181.600922100] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.
+[async_slam_toolbox_node.EXE-2] Registering sensor: [Custom Described Lidar]
+[async_slam_toolbox_node.EXE-2] [INFO] [1793753246.050403100] [slam_toolbox]: Message Filter dropping message: frame 'laser_pc' at time 1798831828.782 for reason 'the timestamp on the message is earlier than all the data in the transform cache'

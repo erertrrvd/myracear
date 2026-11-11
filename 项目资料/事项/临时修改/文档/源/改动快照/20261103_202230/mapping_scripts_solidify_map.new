@@ -1,0 +1,164 @@
+#!/usr/bin/python3
+"""地图后处理：把存好的一趟地图里淡、零散的锥桶点描成实心圆，生成 map_solid.*（只用来看）。
+
+以前由 obstacle_layer 建图时每秒实时做一次（rviz 里 Map Solid 那层）；现在默认关掉实时，
+改成 save_mapping 存完原图后自动调用本脚本做一次（和 projectliu 一样：先存图，再后处理）。
+算法与 obstacle_layer.solidify() 完全相同（直接调用它）：小而孤立的障碍团清掉、在中心画实心圆，
+墙、靠边的点团保持原图。离线没有扫描，锥桶半径用 --radius（默认 0.08 m）。
+
+输入：<趟目录>/map.raw（slam 原始栅格，100 障碍 / 0 空 / -1 未知，行 0 = y 最小）+ map.yaml
+输出：<趟目录>/map_solid.pgm、map_solid.png、map_solid.yaml、solid.json，并登记进 complete.json
+
+用法（一般不用手动跑，save_mapping 会调用）：
+  solidify_map <趟目录>                 例：D:/ubuntu/slam/maps/run_20261103_2002_filtered/run1
+  solidify_map <趟目录> --radius 0.10   锥桶半径改 10 cm
+  solidify_map <趟目录> --force         已有 map_solid 也重新生成
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import struct
+import sys
+import zlib
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+
+
+def load_obstacle_layer():
+    """obstacle_layer 没有 .py 后缀，按文件路径加载，只用它的 solidify()。"""
+    path = HERE / 'obstacle_layer'
+    loader = importlib.machinery.SourceFileLoader('obstacle_layer_mod', str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def read_yaml(path):
+    info = {}
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if ':' in line:
+            k, v = line.split(':', 1)
+            info[k.strip()] = v.strip()
+    res = float(info['resolution'])
+    origin = [float(v) for v in info['origin'].strip('[]').split(',')]
+    return res, origin
+
+
+def read_pgm(path):
+    """P5 pgm：返回 (宽, 高, 像素字节)；头里可能有 # 注释行（map_server 存的图有）。"""
+    data = path.read_bytes()
+    tokens, pos = [], 0
+    while len(tokens) < 4:
+        while data[pos:pos + 1].isspace():
+            pos += 1
+        if data[pos:pos + 1] == b'#':
+            pos = data.index(b'\n', pos) + 1
+            continue
+        end = pos
+        while not data[end:end + 1].isspace():
+            end += 1
+        tokens.append(data[pos:end])
+        pos = end
+    if tokens[0] != b'P5':
+        raise RuntimeError(f'{path} 不是 P5 格式的 pgm')
+    return int(tokens[1]), int(tokens[2]), data[pos + 1:]
+
+
+def write_png(path, width, height, pixels):
+    """8 位灰度 PNG（与 save_mapping 相同，只用标准库）。"""
+    def chunk(tag, data):
+        return (struct.pack('>I', len(data)) + tag + data
+                + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff))
+    rows = b''.join(b'\x00' + pixels[r * width:(r + 1) * width] for r in range(height))
+    path.write_bytes(b'\x89PNG\r\n\x1a\n'
+                     + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 0, 0, 0, 0))
+                     + chunk(b'IDAT', zlib.compress(rows, 9))
+                     + chunk(b'IEND', b''))
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def run(run_dir, radius=0.08, force=False, log=print):
+    """对一趟地图目录做描黑；返回锥桶个数。已有 map_solid（建图时开了实时层）且没有 force 就跳过，返回 None。"""
+    run_dir = Path(run_dir)
+    if (run_dir / 'map_solid.pgm').is_file() and not force:
+        log(f'已有 map_solid（建图时开了实时描黑），不重做：{run_dir}')
+        return None
+    res, origin = read_yaml(run_dir / 'map.yaml')
+    # 宽高从 pgm 头读，栅格数据优先用 map.raw（原始值，pgm 是换算过的灰度）
+    width, height, body = read_pgm(run_dir / 'map.pgm')
+    if (run_dir / 'map.raw').is_file():
+        raw = np.frombuffer((run_dir / 'map.raw').read_bytes(), dtype=np.uint8)
+        if raw.size != width * height:
+            raise RuntimeError(f'map.raw 大小 {raw.size} 与地图 {width}x{height} 对不上')
+        grid = raw.astype(np.int16)
+        grid[grid > 127] -= 256
+        grid = grid.reshape(height, width)
+        # slam 原图里障碍是 100、但也可能有 1~99 的中间值：和 save_mapping 一样按 >= 65 算障碍
+        grid = np.where(grid < 0, -1, np.where(grid >= 65, 100, 0)).astype(np.int8)
+    else:
+        # 没有 map.raw（autosave 目录、map_server 存的图）：按 pgm 灰度换算，第 0 行是 y 最大，翻过来
+        pix = np.frombuffer(body, dtype=np.uint8)[:width * height].reshape(height, width)[::-1]
+        occ_p = 1.0 - pix / 255.0
+        grid = np.where(pix == 205, -1, np.where(occ_p >= 0.65, 100, 0)).astype(np.int8)
+
+    layer = load_obstacle_layer()
+    out, cones, rejected = layer.solidify(grid, res, radius)
+
+    pixels = bytearray()
+    for y in range(height - 1, -1, -1):
+        row = out[y]
+        pixels += bytes(np.where(row < 0, 205, np.where(row >= 65, 0, 254)).astype(np.uint8))
+    pixels = bytes(pixels)
+    prefix = run_dir / 'map_solid'
+    with prefix.with_suffix('.pgm').open('wb') as f:
+        f.write(f'P5\n{width} {height}\n255\n'.encode('ascii'))
+        f.write(pixels)
+    write_png(prefix.with_suffix('.png'), width, height, pixels)
+    prefix.with_suffix('.yaml').write_text(
+        f'image: map_solid.pgm\nresolution: {res:.9g}\n'
+        f'origin: [{origin[0]:.9g}, {origin[1]:.9g}, {origin[2] if len(origin) > 2 else 0.0:.9g}]\n'
+        'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n', encoding='utf-8')
+    ox, oy = origin[0], origin[1]
+    record = dict(mode='post', cone_radius=radius, cones=len(cones), not_isolated=rejected,
+                  cone_centers=[[round(ox + (ci + 0.5) * res, 3), round(oy + (cj + 0.5) * res, 3), k]
+                                for ci, cj, k in cones])
+    (run_dir / 'solid.json').write_text(json.dumps(record, ensure_ascii=False), encoding='utf-8')
+
+    meta_path = run_dir / 'complete.json'
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding='utf-8'))
+        for name in ('map_solid.pgm', 'map_solid.png', 'map_solid.yaml', 'solid.json'):
+            p = run_dir / name
+            meta.setdefault('files', {})[name] = {'bytes': p.stat().st_size, 'sha256': digest(p)}
+        meta['solid'] = 'post'
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + '\n')
+    log(f'描黑完成：锥桶 {len(cones)} 个（半径 {radius:.2f} m），没加工的小团 {rejected} 个'
+        f'（靠墙 / 靠边 / 周围杂点多，保持原图）。看图：{prefix.with_suffix(".png")}')
+    return len(cones)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('run_dir')
+    p.add_argument('--radius', type=float, default=0.08, help='锥桶半径（m）')
+    p.add_argument('--force', action='store_true', help='已有 map_solid 也重新生成')
+    a = p.parse_args()
+    run(a.run_dir, a.radius, a.force)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f'描黑失败：{exc}', file=sys.stderr, flush=True)
+        sys.exit(1)

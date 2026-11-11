@@ -1,0 +1,18 @@
+# Shortcuts: a line that is just "2" / "3" / "4" runs the mapping command below
+#   2 = mapping, original map only (no solid layer); 3 = save; 4 = mapping with solid layer (/map_solid)
+if (Get-Module -ListAvailable PSReadLine) {
+    Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+        $shortcuts = @{
+            '2' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered -NoSolid'
+            '3' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Save'
+            '4' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered'
+        }
+        $line = $null; $cursor = $null
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+        $key = $line.Trim()
+        if ($shortcuts.ContainsKey($key)) {
+            [Microsoft.PowerShell.PSConsoleReadLine]::Replace(0, $line.Length, $shortcuts[$key])
+        }
+        [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+    }
+}

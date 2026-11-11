@@ -1,0 +1,614 @@
+#!/usr/bin/python3
+"""电脑端建图桥：按每帧扫描自身的时间戳发布里程计 TF，SLAM 不再依赖车端 /tf。
+
+车端 /tf 经 WiFi 到电脑后时间对不上扫描，slam_toolbox 会以
+'earlier than all the data in the transform cache' 丢掉全部扫描。本节点：
+  1. 订阅 /scan，重采样为固定点数（beams）并改 frame_id 为 laser_frame_out 后转发到 /scan_pc；
+  2. 在转发前，用该扫描的时间戳发布 odom_frame -> base_frame（位姿取最新
+     /encoder_imu_odom，以首帧为原点；use_odom:=false 时恒为原点，纯激光匹配）；
+  3. 静态发布 base_frame -> laser_frame_out（雷达外参，默认重合）。
+  4. 车速快时：位姿按扫描时刻对里程计插值（而不是取最新一条）；可选 deskew:=true，按
+     里程计估算的车速/角速度对一圈内逐点去畸变（雷达转一圈约 0.1 s，车跑 2 m/s 时一圈内
+     车已前进 20 cm）。去畸变要求知道扫描时间戳是一圈的开始还是结束（stamp_at_end），
+     设反了比不去畸变更差，所以默认关闭，需用实车数据确认后再开。
+帧名与车端 odom/base_footprint/laser_link 完全独立，不会与车端 TF 冲突。
+
+抗丢包（source）：
+  relay  收车端 scan_relay 的 /scan_relay、/odom_relay（可靠 + 留存）：丢包重传、断线恢复后补发；
+  direct 直接收 /scan、/encoder_imu_odom（Best Effort，丢了就没了；离线放 bag 时也用它）；
+  auto   （默认）车上有 /scan_relay 就用 relay，6 s 内没有而 /scan 在发就退回 direct 并报警。
+收到的扫描先进排队区：按时间戳排序、去重（补发会重复），等该时刻的里程计到了再处理，
+再以最多 max_release_hz 帧/秒的速度喂给 SLAM（补发时一次来几百帧，SLAM 需用 sync 版逐帧处理）。
+每 5 s 在 /scan_link（String，JSON）发网络统计：补发帧数、补不回的丢帧、最大延迟，供状态日志记录。
+里程计同时原样转发到本机 /odom_pc，供状态日志计数（避免再经 WiFi 多收一份）。
+
+地面线过滤（ground_filter）：雷达略往下斜时，扫描面在车前几米处打到地面，形成一条跟着车走的直线，
+SLAM 拿它匹配会以为车没动、并把它画成假墙。见 GroundLineFilter。
+"""
+import bisect
+import heapq
+import json
+import math
+import time
+from collections import deque
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy,
+                       qos_profile_sensor_data)
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
+from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
+
+
+def keep_qos(depth):
+    """与车端 scan_relay 配套：可靠 + 留存；读端深度要装得下一次补发的量。"""
+    return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=depth,
+                      reliability=ReliabilityPolicy.RELIABLE,
+                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+
+def stamp_sec(stamp):
+    return stamp.sec + stamp.nanosec * 1e-9
+
+
+def yaw_of(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def make_tf(stamp, parent, child, x, y, yaw, z=0.0):
+    tf = TransformStamped()
+    tf.header.stamp = stamp
+    tf.header.frame_id = parent
+    tf.child_frame_id = child
+    tf.transform.translation.x = x
+    tf.transform.translation.y = y
+    tf.transform.translation.z = z
+    tf.transform.rotation.z = math.sin(yaw / 2.0)
+    tf.transform.rotation.w = math.cos(yaw / 2.0)
+    return tf
+
+
+def wrap(a):
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+class GroundLineFilter:
+    """认出"跟着车走的地面线"并从扫描里删掉。
+
+    扫描面与平地相交，是雷达系里固定的一条直线 n·p = rho（n 为单位法向，角度 theta）。
+    真实的墙在车移动时会在雷达系里移动：朝墙的法向走，rho 变；转弯，theta 变。
+    （与行驶方向平行的墙直走时也不变，但车没有沿它的法向移动，所以不会被误认。）
+    因此：一条长直线在雷达系里一直不变，同时车沿它的法向累计走了 learn_move 米以上、
+    或累计转过 learn_turn 弧度以上，就认定为地面线。
+    认定后每帧删掉 n·p >= rho - tol 的点：线上的是地面；线外的光束早已入地，不可能是真回波。
+    删掉的点填 NaN：slam_toolbox（karto）对 NaN 既不画障碍也不清空射线；
+    不能填 inf，inf 会被当成"直到最大量程都没东西"，把那个方向别处看到的锥桶擦掉。
+    车不动时学不出来：静止建图用 ground_rho / ground_theta_deg 直接给定（学到的值会打印在日志里）。
+    """
+
+    def __init__(self, mode, theta, rho, tol, learn_move, learn_turn, min_len):
+        self.mode = mode                 # auto 自己学 / fixed 只用给定值 / off
+        self.tol = tol
+        self.learn_move = learn_move
+        self.learn_turn = learn_turn
+        self.min_len = min_len
+        self.line = (theta, rho) if rho > 0.0 else None
+        self.cands = []                  # 候选：theta、rho、观测次数、沿法向累计移动、累计转角
+        self.learned = None              # 新认定的地面线，供节点打日志
+        self.removed = 0
+
+    def segments(self, xs, ys):
+        """按扫描顺序把点切成直线段（断开距离 0.3 m，拆分阈值 8 cm），返回 [(theta, rho)]。"""
+        out = []
+        if len(xs) < 2:
+            return out
+        gaps = np.hypot(np.diff(xs), np.diff(ys)) > 0.3
+        cuts = [0, *(np.nonzero(gaps)[0] + 1), len(xs)]
+        stack = [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b - a >= 12]
+        while stack:
+            a, b = stack.pop()
+            px, py = xs[a:b], ys[a:b]
+            ex, ey = px[-1] - px[0], py[-1] - py[0]
+            length = math.hypot(ex, ey)
+            if length < self.min_len:
+                continue
+            d = np.abs(ex * (py - py[0]) - ey * (px - px[0])) / length
+            k = int(np.argmax(d))
+            if d[k] > 0.08:
+                stack += [(a, a + k + 1), (a + k, b)]
+                continue
+            cx, cy = px.mean(), py.mean()
+            w, v = np.linalg.eigh(np.cov(np.vstack([px - cx, py - cy])))
+            nx, ny = v[0, 0], v[1, 0]    # 最小特征值对应的方向 = 法向
+            rho = nx * cx + ny * cy
+            if rho < 0.0:
+                nx, ny, rho = -nx, -ny, -rho
+            if 0.5 <= rho <= 8.0:
+                out.append((math.atan2(ny, nx), rho))
+        return out
+
+    @staticmethod
+    def close(th, rh, line, dth, drh):
+        return abs(wrap(th - line[0])) <= dth and abs(rh - line[1]) <= drh
+
+    def learn(self, xs, ys, pose):
+        """pose = 本帧的里程计位姿 (x, y, yaw)；没有里程计时不学。"""
+        if self.mode != 'auto' or pose is None:
+            return
+        for c in self.cands:
+            c['seen'] = False
+        for th, rh in self.segments(xs, ys):
+            if self.line and self.close(th, rh, self.line, math.radians(4.0), 0.15):
+                # 已认定的线：慢慢跟随（车颠簸、地面略有起伏时会小幅变化）
+                lt, lr = self.line
+                self.line = (lt + 0.05 * wrap(th - lt), lr + 0.05 * (rh - lr))
+                continue
+            c = next((c for c in self.cands
+                      if self.close(th, rh, (c['theta'], c['rho']), math.radians(3.0), 0.10)), None)
+            if c is None:
+                self.cands.append(dict(theta=th, rho=rh, n=1, along=0.0, rot=0.0,
+                                       pose=pose, miss=0, seen=True))
+                continue
+            if c['seen']:
+                continue                 # 同一帧里同一条线被拆成几段，只算一次
+            x0, y0, a0 = c['pose']
+            nyaw = pose[2] + c['theta']  # 线的法向在里程计系里的方向
+            c['along'] += abs((pose[0] - x0) * math.cos(nyaw) + (pose[1] - y0) * math.sin(nyaw))
+            c['rot'] += abs(wrap(pose[2] - a0))
+            c['theta'] += wrap(th - c['theta']) / (c['n'] + 1)
+            c['rho'] += (rh - c['rho']) / (c['n'] + 1)
+            c['n'] += 1
+            c['pose'], c['miss'], c['seen'] = pose, 0, True
+        for c in self.cands:
+            if not c['seen']:
+                c['miss'] += 1
+        self.cands = [c for c in self.cands if c['miss'] <= 5][-30:]
+        for c in self.cands:
+            if c['n'] >= 10 and (c['along'] >= self.learn_move or c['rot'] >= self.learn_turn):
+                self.line = (c['theta'], c['rho'])
+                self.learned = dict(c)
+                self.cands = []
+                break
+
+    def apply(self, ranges, angs):
+        """删掉地面线上和线外的点（填 NaN），返回新的 ranges 数组。"""
+        if self.line is None:
+            return ranges
+        th, rh = self.line
+        with np.errstate(invalid='ignore'):
+            mask = np.isfinite(ranges) & (ranges * np.cos(angs - th) >= rh - self.tol)
+        n = int(mask.sum())
+        if n:
+            ranges = ranges.copy()
+            ranges[mask] = np.nan
+            self.removed += n
+        return ranges
+
+
+class ScanTfBridge(Node):
+    def __init__(self):
+        super().__init__('scan_tf_bridge')
+        self.use_odom = self.declare_parameter('use_odom', True).value
+        self.odom_frame = self.declare_parameter('odom_frame', 'odom_pc').value
+        self.base_frame = self.declare_parameter('base_frame', 'base_pc').value
+        self.laser_frame = self.declare_parameter('laser_frame_out', 'laser_pc').value
+        self.max_step = self.declare_parameter('max_step_m', 2.0).value
+        laser = [self.declare_parameter(n, 0.0).value
+                 for n in ('laser_x', 'laser_y', 'laser_yaw')]
+
+        self.beams = int(self.declare_parameter('beams', 720).value)
+        self.deskew = bool(self.declare_parameter('deskew', False).value)
+        # 雷达转一圈的时间；扫描时间戳默认取一圈的开始，驱动取结束时设 stamp_at_end:=true。
+        self.scan_period = float(self.declare_parameter('scan_period', 0.1).value)
+        self.stamp_at_end = bool(self.declare_parameter('stamp_at_end', False).value)
+        # 查位姿时给扫描时间加的偏移（s）：里程计与扫描存在固定延迟时用来对齐，正负都可。
+        self.odom_offset = float(self.declare_parameter('odom_offset', 0.0).value)
+        self.source = self.declare_parameter('source', 'auto').value
+        if self.source not in ('auto', 'relay', 'direct'):
+            raise RuntimeError('source 只能是 auto、relay 或 direct')
+        self.max_release_hz = float(self.declare_parameter('max_release_hz', 40.0).value)
+        self.relay_wait_s = float(self.declare_parameter('relay_wait_s', 3.0).value)
+        self.startup_keep_s = float(self.declare_parameter('startup_keep_s', 2.0).value)
+        self.hist_s = float(self.declare_parameter('hist_s', 120.0).value)
+        # 地面线过滤：auto 车动起来后自己认出地面线并删掉；fixed 只用 ground_rho/ground_theta_deg；off 关闭。
+        # ground_rho：雷达到地面线的垂直距离（m，0 = 未给定）；ground_theta_deg：地面线法向（雷达系，0 = 正前方）。
+        ground_mode = self.declare_parameter('ground_filter', 'auto').value
+        if ground_mode not in ('auto', 'fixed', 'off'):
+            raise RuntimeError('ground_filter 只能是 auto、fixed 或 off')
+        self.ground = None if ground_mode == 'off' else GroundLineFilter(
+            ground_mode,
+            math.radians(float(self.declare_parameter('ground_theta_deg', 0.0).value)),
+            float(self.declare_parameter('ground_rho', 0.0).value),
+            float(self.declare_parameter('ground_tol', 0.15).value),
+            float(self.declare_parameter('ground_learn_move', 1.0).value),
+            float(self.declare_parameter('ground_learn_turn', 0.5).value),
+            float(self.declare_parameter('ground_min_len', 1.0).value))
+        self.grid = None             # 输出扫描各光束的角度（numpy），首帧时生成
+        self.hist = deque()          # (t, x, y, yaw_unwrapped)，按里程计时间戳排序
+        self.speed_log = 0.0
+        self.stamp_gap = None
+        self.interp_miss = 0
+        self.last_stamp = None
+        self.first = None
+        self.pose = (0.0, 0.0, 0.0)
+        self.anchor = (0.0, 0.0, 0.0)
+        self.scans = self.odoms = self.odom_rejected = 0
+        self.no_odom_reports = 0
+
+        self.broadcaster = TransformBroadcaster(self)
+        self.static = StaticTransformBroadcaster(self)
+        self.static.sendTransform(make_tf(self.get_clock().now().to_msg(), self.base_frame,
+                                          self.laser_frame, *laser))
+        self.pub = self.create_publisher(LaserScan, '/scan_pc', qos_profile_sensor_data)
+        self.odom_pc = self.create_publisher(Odometry, '/odom_pc', 50)
+        self.link_pub = self.create_publisher(String, '/scan_link', 10)
+
+        # 排队区：(扫描时间戳, 到达的本机时间, 消息)；按时间戳出队
+        self.pending = []
+        self.pending_stamps = set()
+        self.last_released = None    # 已交给 SLAM 的最新扫描时间戳（更早的一律当重复丢掉）
+        self.last_odom_t = None
+        self.first_relay_wall = None
+        self.startup_done = False
+        self.delay_floor = None      # min(到达时刻 - 时间戳)：车和电脑时钟差 + 最小网络延迟
+        self.link = dict(recv=0, dup=0, late=0, lost=0, max_delay=0.0, gap_max=0.0)
+        self.active = None           # 实际在用的来源 relay / direct
+        self.direct_subs = []
+        self.relay_subs = []
+        self.t_start = time.monotonic()
+        if self.source in ('auto', 'relay'):
+            self.relay_subs = [
+                self.create_subscription(LaserScan, '/scan_relay',
+                                         lambda m: self.on_scan(m, 'relay'), keep_qos(1000)),
+                *([self.create_subscription(Odometry, '/odom_relay',
+                                            lambda m: self.on_odom(m, 'relay'), keep_qos(4000))]
+                  if self.use_odom else []),
+            ]
+        if self.source == 'direct':
+            self.set_direct(True)
+        self.create_timer(1.0, self.choose_source)
+        self.create_timer(1.0 / max(1.0, self.max_release_hz), self.release)
+        self.create_timer(5.0, self.report)
+        self.get_logger().info(
+            f'扫描桥启动：来源 {self.source}（relay=/scan_relay 可靠补发，direct=/scan）-> /scan_pc（{self.laser_frame}），'
+            f'{self.odom_frame} -> {self.base_frame} 位姿来源：'
+            f'{"里程计" if self.use_odom else "无（纯激光匹配）"}')
+
+    def set_direct(self, on):
+        if on and not self.direct_subs:
+            self.direct_subs = [
+                self.create_subscription(LaserScan, '/scan', lambda m: self.on_scan(m, 'direct'),
+                                         qos_profile_sensor_data),
+                *([self.create_subscription(Odometry, '/encoder_imu_odom',
+                                            lambda m: self.on_odom(m, 'direct'), 50)]
+                  if self.use_odom else []),
+            ]
+        elif not on and self.direct_subs:
+            for s in self.direct_subs:
+                self.destroy_subscription(s)
+            self.direct_subs = []
+
+    def choose_source(self):
+        if self.source != 'auto':
+            self.active = self.source
+            return
+        relay_pubs = self.count_publishers('/scan_relay')
+        if relay_pubs > 0:
+            if self.active != 'relay':
+                self.get_logger().info('车上有 scan_relay：改收 /scan_relay、/odom_relay（可靠传输，断线补发）')
+            self.active = 'relay'
+            self.set_direct(False)
+        elif self.active is None and time.monotonic() - self.t_start > 6.0 \
+                and self.count_publishers('/scan') > 0:
+            self.active = 'direct'
+            self.set_direct(True)
+            self.get_logger().error(
+                '!! 车上没有 scan_relay（/scan_relay 没有发布者），退回直接收 /scan：WiFi 丢包时会丢帧。'
+                '请把小车端 distributed_mapping_vehicle.launch.py 和 scan_relay 更新上车（手册第 4 章）')
+
+    def on_odom(self, msg, via='direct'):
+        t = stamp_sec(msg.header.stamp)
+        if self.last_odom_t is not None and t <= self.last_odom_t:
+            return                       # 补发造成的重复（或时间倒退），丢掉
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        values = (p.x, p.y, yaw_of(q))
+        if not all(math.isfinite(v) for v in values):
+            self.odom_rejected += 1
+            return
+        dt = 0.0 if self.last_odom_t is None else t - self.last_odom_t
+        self.last_odom_t = t
+        self.odom_pc.publish(msg)
+        if self.first is None:
+            self.first = values
+        x0, y0, yaw0 = self.first
+        dx, dy = p.x - x0, p.y - y0
+        rx = math.cos(yaw0) * dx + math.sin(yaw0) * dy
+        ry = -math.sin(yaw0) * dx + math.cos(yaw0) * dy
+        ryaw = values[2] - yaw0
+        # 位姿 = 锚点位姿 ⊕ 相对首帧的位移；里程计跳变时重设锚点，避免永久卡死。
+        bx, by, byaw = self.anchor
+        x = bx + math.cos(byaw) * rx - math.sin(byaw) * ry
+        y = by + math.sin(byaw) * rx + math.cos(byaw) * ry
+        yaw = math.atan2(math.sin(byaw + ryaw), math.cos(byaw + ryaw))
+        # 跳变阈值随间隔放宽：断线补不回的一段里车本来就走了一段（按 4 m/s 上限估）。
+        if math.hypot(x - self.pose[0], y - self.pose[1]) > self.max_step + 4.0 * max(0.0, dt):
+            self.anchor = self.pose
+            self.first = values
+            self.hist.clear()
+            self.odom_rejected += 1
+            return
+        self.pose = (x, y, yaw)
+        self.odoms += 1
+        if self.hist:
+            prev = self.hist[-1][3]
+            yaw = prev + math.atan2(math.sin(yaw - prev), math.cos(yaw - prev))
+        self.hist.append((t, x, y, yaw))
+        # 留 hist_s 秒：补发时里程计可能比扫描先到几十秒。
+        while len(self.hist) > 2 and t - self.hist[0][0] > self.hist_s:
+            self.hist.popleft()
+
+    def pose_at(self, t):
+        """扫描时刻 t 的位姿与速度 (x, y, yaw, v, w)；缓存对不上时退回最新位姿。"""
+        h = self.hist
+        if h:
+            self.stamp_gap = t - h[-1][0]      # 扫描时间戳 - 最新里程计时间戳，供诊断
+        if len(h) < 2 or t < h[0][0] - 0.05 or t > h[-1][0] + 0.3:
+            self.interp_miss += 1
+            return (*self.pose, 0.0, 0.0)
+        ts = [e[0] for e in h]
+
+        def interp(tt):
+            tt = min(max(tt, ts[0]), ts[-1])
+            j = min(max(bisect.bisect_left(ts, tt), 1), len(h) - 1)
+            t0, x0, y0, a0 = h[j - 1]
+            t1, x1, y1, a1 = h[j]
+            f = 0.0 if t1 == t0 else (tt - t0) / (t1 - t0)
+            return x0 + f * (x1 - x0), y0 + f * (y1 - y0), a0 + f * (a1 - a0)
+
+        # 速度窗口以"不晚于最新里程计"为终点往回 0.2 s：扫描时间戳常比最新一条里程计还晚
+        # （里程计有发布延迟），窗口若以扫描时刻为中心会缩成空，速度被误算成 0。
+        tb = min(t + 0.1, ts[-1])
+        ta = max(tb - 0.2, ts[0])
+        if tb - ta < 0.05:
+            x, y, yaw = interp(t)
+            return (x, y, math.atan2(math.sin(yaw), math.cos(yaw)), 0.0, 0.0)
+        xa, ya, aa = interp(ta)
+        xb, yb, ab = interp(tb)
+        vx, vy, w = (xb - xa) / (tb - ta), (yb - ya) / (tb - ta), (ab - aa) / (tb - ta)
+        x, y, yaw = interp(t)
+        if t > ts[-1]:                      # 扫描比最新里程计新：按窗口速度外推
+            dt = t - ts[-1]
+            x, y, yaw = x + vx * dt, y + vy * dt, yaw + w * dt
+        v = vx * math.cos(yaw) + vy * math.sin(yaw)
+        return (x, y, math.atan2(math.sin(yaw), math.cos(yaw)), v, w)
+
+    def resample(self, msg, v=0.0, w=0.0):
+        """重采样到固定 360° 角度网格，并按车速 v(m/s)、角速度 w(rad/s) 对一圈内逐点去畸变。
+
+        雷达每帧点数和起止角会变（如 366/368），slam_toolbox 要求每帧点数与首帧一致，
+        否则拒收该帧；点数不够的格子不能留成 inf（slam_toolbox 会把 inf 当射线一直清空
+        到最大量程，穿墙擦出放射状条纹），所以对每个输出角度格取最近的真实点。"""
+        n_in = len(msg.ranges)
+        out = LaserScan()
+        out.header.stamp = msg.header.stamp
+        out.header.frame_id = self.laser_frame
+        out.range_min, out.range_max = msg.range_min, msg.range_max
+        out.scan_time, out.time_increment = msg.scan_time, 0.0
+        n = self.beams
+        out.angle_increment = 2.0 * math.pi / n
+        out.angle_min = -math.pi
+        out.angle_max = -math.pi + out.angle_increment * (n - 1)
+        ranges = [math.inf] * n
+        if n_in >= 2:
+            # 按本帧实际点数推算角度，不信任驱动给出的 angle_increment。
+            step = (msg.angle_max - msg.angle_min) / (n_in - 1)
+            moving = self.deskew and (abs(v) > 0.05 or abs(w) > 0.02)
+            pts = []                       # (角度, 距离)，已补偿到"一圈开始"时刻的车体系
+            for i, r in enumerate(msg.ranges):
+                if not (math.isfinite(r) and msg.range_min <= r <= msg.range_max):
+                    continue
+                a = msg.angle_min + i * step
+                if moving:
+                    frac = i / n_in
+                    dt = (frac - 1.0 if self.stamp_at_end else frac) * self.scan_period
+                    px, py = r * math.cos(a), r * math.sin(a)
+                    c, sn = math.cos(w * dt), math.sin(w * dt)
+                    # 点测于 dt 时刻的车体系；换到参考时刻车体系：先旋转 w*dt，再平移车的位移。
+                    half = w * dt / 2.0
+                    tx, ty = v * dt * math.cos(half), v * dt * math.sin(half)
+                    px, py = c * px - sn * py + tx, sn * px + c * py + ty
+                    a, r = math.atan2(py, px), math.hypot(px, py)
+                # 驱动的角度范围可能是 0..2π：统一折到 [-π, π)，否则排序后的最近邻搜索
+                # 找不到负角度格子里的点，那一半（车体右侧）整片变空。
+                a = (a + math.pi) % (2.0 * math.pi) - math.pi
+                pts.append((a, r))
+            if pts:
+                pts.sort()
+                angs = [q[0] for q in pts]
+                tol = 1.5 * step
+                for k in range(n):
+                    a = out.angle_min + k * out.angle_increment
+                    j = bisect.bisect_left(angs, a)
+                    best = None
+                    for idx in (j - 1, j % len(pts)):
+                        d = abs((angs[idx] - a + math.pi) % (2.0 * math.pi) - math.pi)
+                        if d <= tol and (best is None or d < best[0]):
+                            best = (d, pts[idx][1])
+                    if best is not None:
+                        ranges[k] = best[1]
+        out.ranges = ranges
+        return out
+
+    def on_scan(self, msg, via='direct'):
+        """收到扫描：去重后放进排队区，由 release() 按时间顺序处理。"""
+        t = stamp_sec(msg.header.stamp)
+        if (self.last_released is not None and t <= self.last_released) or t in self.pending_stamps:
+            self.link['dup'] += 1
+            return
+        now = time.monotonic()
+        wall = time.time()
+        # 延迟 = 到达时刻 - 时间戳 - 时钟差；时钟差取历史最小值（车和电脑的钟不一致）。
+        lag = wall - t
+        if self.delay_floor is None or lag < self.delay_floor:
+            self.delay_floor = lag
+        delay = lag - self.delay_floor
+        self.link['recv'] += 1
+        if delay > 0.5:
+            self.link['late'] += 1       # 晚到 0.5 s 以上 = 重传或断线后补发来的
+        self.link['max_delay'] = max(self.link['max_delay'], delay)
+        if via == 'relay' and self.first_relay_wall is None:
+            self.first_relay_wall = now
+        heapq.heappush(self.pending, (t, now, msg))
+        self.pending_stamps.add(t)
+
+    def odom_ready(self, t, arrived):
+        """t 时刻的里程计到了没有；等太久就不等了（退回最新位姿）。"""
+        if not self.use_odom:
+            return True
+        if self.last_odom_t is not None and self.last_odom_t >= t + self.odom_offset:
+            return True
+        limit = self.relay_wait_s if self.first_relay_wall is not None else 0.3
+        return time.monotonic() - arrived > limit
+
+    def release(self):
+        # relay 刚连上时会先收到车上留存的最近 60 s（车可能被搬动过），只保留最后 startup_keep_s 秒。
+        if not self.startup_done:
+            if self.first_relay_wall is None:
+                if self.active == 'direct' or self.source == 'direct':
+                    self.startup_done = True
+                else:
+                    return
+            elif time.monotonic() - self.first_relay_wall < 1.5:
+                return
+            else:
+                self.startup_done = True
+                if self.pending:
+                    cut = max(e[0] for e in self.pending) - self.startup_keep_s
+                    old = [e for e in self.pending if e[0] < cut]
+                    if old:
+                        self.pending = [e for e in self.pending if e[0] >= cut]
+                        heapq.heapify(self.pending)
+                        self.pending_stamps = {e[0] for e in self.pending}
+                        self.last_released = cut
+                        self.get_logger().info(f'连上 scan_relay：丢掉启动前留存的 {len(old)} 帧旧扫描，'
+                                               f'只从最近 {self.startup_keep_s:.0f} s 开始建图')
+        # 积压多时一次多放几帧，但每次最多 2 帧，避免一下子塞满 SLAM 的队列。
+        for _ in range(2 if len(self.pending) > 20 else 1):
+            if not self.pending:
+                return
+            t, arrived, msg = self.pending[0]
+            if not self.odom_ready(t, arrived):
+                return
+            heapq.heappop(self.pending)
+            self.pending_stamps.discard(t)
+            if self.last_released is not None and t <= self.last_released:
+                continue
+            self.process(msg, t)
+
+    def process(self, msg, stamp):
+        if self.last_stamp is not None:
+            gap = stamp - self.last_stamp
+            if gap > 1.5 * self.scan_period:
+                self.link['lost'] += max(0, round(gap / self.scan_period) - 1)
+                self.link['gap_max'] = max(self.link['gap_max'], gap)
+            if gap > 5.0:
+                self.get_logger().warn(f'扫描中断 {gap:.1f} s 后恢复（这段补不回来：断线超过车上留存时长，或没开 scan_relay）')
+        self.last_stamp = stamp
+        self.last_released = stamp
+        # 位姿取扫描时刻的插值，不是最新一条：里程计约 25 Hz，车速 2 m/s 时最新一条
+        # 最多比扫描晚 4 cm 以上。
+        x, y, yaw, v, w = self.pose_at(stamp + self.odom_offset) if self.use_odom else (0.0, 0.0, 0.0, 0.0, 0.0)
+        self.speed_log = max(self.speed_log, abs(v))
+        out = self.resample(msg, v, w)
+        if self.ground is not None:
+            self.filter_ground(out, (x, y, yaw) if self.use_odom else None)
+        # 先发与扫描同一时间戳的 TF，再转发扫描，SLAM 收到扫描时 TF 一定已在缓存中。
+        self.broadcaster.sendTransform(
+            make_tf(msg.header.stamp, self.odom_frame, self.base_frame, x, y, yaw))
+        self.pub.publish(out)
+        self.scans += 1
+
+    def filter_ground(self, out, pose):
+        if self.grid is None:
+            self.grid = out.angle_min + out.angle_increment * np.arange(len(out.ranges))
+        r = np.asarray(out.ranges, dtype=float)
+        ok = np.isfinite(r)
+        self.ground.learn(r[ok] * np.cos(self.grid[ok]), r[ok] * np.sin(self.grid[ok]), pose)
+        if self.ground.learned is not None:
+            c = self.ground.learned
+            self.ground.learned = None
+            self.get_logger().warn(
+                f'认出地面线（跟着车走的直线）：法向 {math.degrees(c["theta"]):.1f}°、距雷达 {c["rho"]:.2f} m'
+                f'（观测 {c["n"]} 帧，车沿法向走了 {c["along"]:.2f} m、转了 {math.degrees(c["rot"]):.0f}°），'
+                f'从现在起删掉这条线上和线外的点。静止建图可直接给定：'
+                f'ground_rho:={c["rho"]:.2f} ground_theta_deg:={math.degrees(c["theta"]):.1f}')
+        out.ranges = self.ground.apply(r, self.grid).tolist()
+
+    def report(self):
+        x, y, yaw = self.pose
+        self.get_logger().info(
+            f'5s 内转发扫描 {self.scans} 帧，采用里程计 {self.odoms} 条，'
+            f'拒绝 {self.odom_rejected} 条；位姿 x={x:.2f} y={y:.2f} yaw={math.degrees(yaw):.1f}°；'
+            f'5s 内最高车速 {self.speed_log:.2f} m/s')
+        if self.use_odom:
+            gap = '无' if self.stamp_gap is None else f'{self.stamp_gap:+.3f} s'
+            self.get_logger().info(
+                f'里程计缓存 {len(self.hist)} 条；扫描-最新里程计时间差 {gap}；'
+                f'5s 内插值失败 {self.interp_miss} 次（失败时退回最新位姿且不去畸变）')
+        L = self.link
+        status = dict(source=self.active or '未定', recv=L['recv'], dup=L['dup'], late=L['late'],
+                      lost=L['lost'], gap_max=round(L['gap_max'], 2),
+                      max_delay=round(L['max_delay'], 2), pending=len(self.pending))
+        if self.ground is not None:
+            g = self.ground.line
+            status['ground'] = None if g is None else [round(math.degrees(g[0]), 1), round(g[1], 2)]
+            status['ground_removed'] = self.ground.removed
+            self.get_logger().info(
+                '地面线：' + ('还没认出（车要动起来才学得到）' if g is None else
+                            f'法向 {math.degrees(g[0]):.1f}°、距雷达 {g[1]:.2f} m，'
+                            f'5s 内删掉 {self.ground.removed} 个点'))
+            self.ground.removed = 0
+        self.link_pub.publish(String(data=json.dumps(status, ensure_ascii=False)))
+        self.get_logger().info(
+            f'网络（{status["source"]}）：5s 内收到扫描 {L["recv"]} 帧，其中晚到（重传/补发）{L["late"]} 帧，'
+            f'重复丢弃 {L["dup"]} 帧，补不回的丢帧 {L["lost"]} 帧（最长中断 {L["gap_max"]:.2f} s），'
+            f'最大延迟 {L["max_delay"]:.2f} s，排队 {len(self.pending)} 帧')
+        self.link = dict(recv=0, dup=0, late=0, lost=0, max_delay=0.0, gap_max=0.0)
+        self.speed_log = 0.0
+        self.interp_miss = 0
+        if self.scans == 0 and not self.pending:
+            self.get_logger().warn('5s 内没有收到扫描（/scan_relay 或 /scan）')
+        if self.use_odom and self.scans > 0 and self.odoms == 0 and self.odom_rejected == 0:
+            self.no_odom_reports += 1
+            # 没有里程计时位姿恒为原点，而 slam_toolbox 要移动超过 minimum_travel_distance 才处理新扫描，
+            # 地图基本不会增长（实测：odometry_messages=0 时地图只有 25 个障碍格）。
+            if self.no_odom_reports in (1, 3) or self.no_odom_reports % 12 == 0:
+                self.get_logger().error(
+                    '!! 5s 内没有收到 /encoder_imu_odom，但 use_odom=true：位姿一直是原点，地图几乎不会增长。'
+                    '请检查小车上 imu_encoder_mix 是否在运行（ros2 topic hz /encoder_imu_odom）；'
+                    '确实没有里程计就用 use_odom:=false（Windows 脚本加 -NoOdom）重新建图。')
+        elif self.odoms > 0:
+            self.no_odom_reports = 0
+        self.scans = self.odoms = self.odom_rejected = 0
+
+
+def main():
+    rclpy.init()
+    node = ScanTfBridge()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

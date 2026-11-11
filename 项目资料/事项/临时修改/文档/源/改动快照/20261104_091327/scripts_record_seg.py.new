@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+录制 AB 停车段轨迹 -> 独立 CSV（不会覆盖 path.csv / init_scan.csv）
+
+用法（就这两条）:
+  python3 record_seg.py a      -> /home/racecar/pt/ab_a.csv
+  python3 record_seg.py b      -> /home/racecar/pt/ab_b.csv
+
+不用手动 source ROS：脚本发现自己 import 不到 rclpy 时，
+会自动 source /opt/ros/*/setup.bash 和工作空间的 setup.bash，然后重跑自己。
+（conda 的 python 没有 rclpy，脚本会用 /usr/bin/python3 重跑，不用 conda deactivate）
+
+里程计用快捷键 1 起的 imu_encoder_mix（11-04 起车上只留这一个；没在跑会提示先敲 1）；
+get_distance 会自动起（已经在跑就不重复起），Ctrl+C 时一起关掉。
+
+输出格式和固件 save_path 一致：表头 x,y,yaw,type + 每行 x,y,yaw,1
+这个格式可以直接拖进「AB停车轨迹转换器.html」。
+"""
+import math
+import os
+import subprocess
+import sys
+import time
+
+# ================= 固定路径（想改只改这里） =================
+PT = "/home/racecar/pt"
+FILES = {
+    "a":    PT + "/ab_a.csv",
+    "b":    PT + "/ab_b.csv",
+    "main": PT + "/main.csv",
+}
+DEFAULT_KEY = "a"
+DX = 0.1                     # 点距 m
+# ==========================================================
+
+
+def _build_shell(ros, rosdir, ws, cands, vers, script, args):
+    """拼出要交给 bash -c 的脚本。
+       必须用【换行】拼：for/then 后面不能跟 ';'，拼成一行会 syntax error。"""
+    sh = []
+    sh.append("source '%s'" % ros)
+    if ws:
+        sh.append("source '%s'" % ws)
+    sh.append("export _REC_BOOTSTRAPPED=1")
+    sh.append("for PY in %s; do" % " ".join("'%s'" % c for c in cands))
+    sh.append('  if [ -x "$PY" ] || command -v "$PY" >/dev/null 2>&1; then')
+    sh.append('    if "$PY" -c "import rclpy" >/dev/null 2>&1; then')
+    sh.append('      echo "[env] 用 $PY 启动"')
+    sh.append('      exec "$PY" \'%s\'%s' % (script, args))
+    sh.append('    fi')
+    sh.append('  fi')
+    sh.append('done')
+    sh.append('echo "[env] 试过的解释器都不行: %s" >&2' % " ".join(cands))
+    sh.append('echo "[env] ROS 需要 python3.%s" >&2'
+              % (sorted(vers, reverse=True)[0] if vers else "?"))
+    sh.append('ls -d %s/lib/python3.*/site-packages 2>/dev/null >&2' % rosdir)
+    sh.append('ls %s/lib/python3.*/site-packages/_rclpy_pybind11* 2>/dev/null >&2' % rosdir)
+    sh.append('echo "把上面两行发我" >&2')
+    sh.append('exit 1')
+    return "\n".join(sh)
+
+
+def _bootstrap():
+    """没 rclpy 就 source 完 ROS、找到版本匹配的解释器，重跑自己。"""
+    try:
+        import rclpy            # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    if os.environ.get("_REC_BOOTSTRAPPED") == "1":
+        sys.stderr.write(
+            "\n[错误] source 过 ROS 之后还是 import 不到 rclpy。\n"
+            "       把下面这些发我：\n"
+            "         ls -d /opt/ros/*/lib/python3.*/site-packages\n"
+            "         ls /opt/ros/*/lib/python3.*/site-packages/_rclpy_pybind11*\n\n")
+        sys.exit(1)
+
+    ros = None
+    for d in ("/opt/ros/humble", "/opt/ros/iron", "/opt/ros/jazzy", "/opt/ros/foxy"):
+        if os.path.isfile(os.path.join(d, "setup.bash")):
+            ros = os.path.join(d, "setup.bash")
+            break
+    if ros is None:
+        sys.stderr.write("\n[错误] /opt/ros/ 下找不到 setup.bash —— ROS 装在哪？\n\n")
+        sys.exit(1)
+    rosdir = os.path.dirname(ros)
+
+    # 从 ROS 的目录结构读出它需要哪个 python 版本（例如 python3.10）
+    import glob
+    import re
+    vers = set()
+    for pat in ("lib/python3.*/site-packages", "local/lib/python3.*/dist-packages"):
+        for p in glob.glob(os.path.join(rosdir, pat)):
+            m = re.search(r"python3\.(\d+)", p)
+            if m:
+                vers.add(m.group(1))
+    cands = []
+    for v in sorted(vers, reverse=True):
+        cands += ["/usr/bin/python3.%s" % v, "/usr/local/bin/python3.%s" % v]
+    cands += ["/usr/bin/python3", "python3"]
+    seen = set()
+    cands = [c for c in cands if not (c in seen or seen.add(c))]
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    wss = [os.path.normpath(os.path.join(here, "..", "install", "setup.bash")),
+           os.path.normpath(os.path.join(here, "..", "..", "install", "setup.bash")),
+           os.path.normpath(os.path.join(here, "..", "..", "..", "install", "setup.bash")),
+           "/home/racecar/install/setup.bash",
+           "/home/racecar/src/my_racecar/install/setup.bash",
+           os.path.expanduser("~/install/setup.bash")]
+    ws = next((p for p in wss if os.path.isfile(p)), None)
+
+    args = "".join(" '%s'" % a.replace("'", "'\\''") for a in sys.argv[1:])
+    script = os.path.abspath(__file__).replace("'", "'\\''")
+
+    shell = _build_shell(ros, rosdir, ws, cands, vers, script, args)
+
+    print("[env] 当前 python 是 %s（%d.%d），它没有可用的 rclpy"
+          % (sys.executable, sys.version_info[0], sys.version_info[1]))
+    print("[env] ROS 需要 python3.%s，准备依次试: %s"
+          % (sorted(vers, reverse=True)[0] if vers else "?", " ".join(cands)))
+    if ws:
+        print("[env] 工作空间: %s" % ws)
+    sys.stdout.flush()
+    os.execvp("bash", ["bash", "-c", shell])
+
+
+_bootstrap()
+
+# ---- 到这里 rclpy 一定可用 ----
+import rclpy                       # noqa: E402
+from rclpy.node import Node        # noqa: E402
+from std_msgs.msg import Float32   # noqa: E402
+from nav_msgs.msg import Odometry  # noqa: E402
+
+
+def quat_to_yaw(x, y, z, w):
+    # 和 save_path.cpp:157 同一个公式
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+class Recorder(Node):
+
+    def __init__(self, out, dx, kids):
+        super().__init__("record_seg")
+        self.dx = dx
+        self.out = out
+        self.kids = kids
+        self.f = open(out, "w")
+        self.f.write("x,y,yaw,type\n")
+
+        self.x = self.y = self.yaw = 0.0
+        self.have_odom = False
+        self.last_dis = None
+        self.n = 0
+        self.length = 0.0
+        self.px = self.py = None
+
+        self.create_subscription(Float32, "distance", self.on_dis, 10)
+        self.create_subscription(Odometry, "/key1_odom", self.on_odom, 10)   # 快捷键 1 起的里程计（11-04 改名）
+        self.get_logger().info("输出文件 : %s" % self.out)
+        self.get_logger().info("点距     : %.3f m" % dx)
+        self.get_logger().info("等数据中…… 车摆好后开始推，Ctrl+C 结束")
+
+    def on_odom(self, msg):
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        self.x, self.y = p.x, p.y
+        self.yaw = quat_to_yaw(q.x, q.y, q.z, q.w)
+        self.have_odom = True
+
+    def on_dis(self, msg):
+        if not self.have_odom:
+            return
+        dis = msg.data
+        if self.last_dis is None:
+            self.last_dis = dis - self.dx          # 第一帧就记，起点不会丢
+        if dis - self.last_dis < self.dx - 1e-4:
+            return
+        if self.px is not None:
+            self.length += math.hypot(self.x - self.px, self.y - self.py)
+        self.px, self.py = self.x, self.y
+        self.f.write("%.9f,%.9f,%.9f,1\n" % (self.x, self.y, self.yaw))
+        self.f.flush()                              # 边录边落盘，Ctrl+C 不丢
+        self.last_dis = dis
+        self.n += 1
+        if self.n == 1:
+            self.get_logger().info("起点已记下 (%.3f, %.3f)  朝向 %.2f°"
+                                   % (self.x, self.y, math.degrees(self.yaw)))
+        elif self.n % 10 == 0:
+            self.get_logger().info("已录 %d 点, 长度 %.2f m" % (self.n, self.length))
+
+    def close(self):
+        try:
+            self.f.close()
+        except Exception:
+            pass
+        self.get_logger().info("=" * 50)
+        self.get_logger().info("录完: %d 点, 长度 %.2f m" % (self.n, self.length))
+        self.get_logger().info("文件: %s" % self.out)
+        self.get_logger().info("=" * 50)
+        for p in self.kids:
+            try:
+                p.terminate()
+                p.wait(timeout=3)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        if self.kids:
+            self.get_logger().info("已关掉本次启动的里程计/测距节点")
+
+
+def alive(pat):
+    try:
+        return subprocess.run(["pgrep", "-f", pat],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def start_node(exe, pkg, kids):
+    """环境已经 source 好了，直接 ros2 run"""
+    if alive(exe):
+        print("[node] %s 已在运行，不重复启动" % exe)
+        return
+    try:
+        p = subprocess.Popen(["ros2", "run", pkg, exe],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        kids.append(p)
+        print("[node] 已启动 %s" % exe)
+    except FileNotFoundError:
+        print("[node] 启动 %s 失败：找不到 ros2" % exe)
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        print("可选: a | b | main | 任意绝对路径")
+        return 0
+    key = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_KEY
+    out = FILES.get(key.lower(), key if os.path.isabs(key) else os.path.join(PT, key))
+    # 11-04：车上只留一个里程计（快捷键 1 起的），本脚本不再自己起 imu_encoder_mix
+    if not alive("key1_odom"):          # launch 把 remap 写在命令行里：-r /encoder_imu_odom:=/key1_odom
+        print("!! 没有里程计在运行：先在小车另一个终端敲 1（启动 imu_encoder_mix），再运行本脚本")
+        return 1
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+
+    if os.path.exists(out):
+        bak = "%s.bak_%s" % (out, time.strftime("%H%M%S"))
+        os.rename(out, bak)
+        print("原文件已备份为 %s" % os.path.basename(bak))
+
+    kids = []
+    print("=" * 54)
+    print("[node] imu_encoder_mix 已在运行（快捷键 1 起的），用它")
+    start_node("get_distance", "my_racecar", kids)
+    print("=" * 54)
+
+    rclpy.init()
+    node = Recorder(out, DX, kids)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.close()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

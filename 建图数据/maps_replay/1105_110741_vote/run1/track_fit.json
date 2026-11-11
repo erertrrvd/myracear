@@ -1,0 +1,25 @@
+{
+ "track": "A",
+ "given": false,
+ "corrected": true,
+ "similar": false,
+ "ambiguous": true,
+ "second": "B",
+ "score": 0.649,
+ "scores": {
+  "A": 0.649,
+  "B": 0.651,
+  "C": 0.659,
+  "D": 0.653
+ },
+ "scale": 0.9663,
+ "rotation_deg": -4.26,
+ "cones": 98,
+ "matched": 50,
+ "cones_out": 41,
+ "ghosts_removed": 21,
+ "dist_rigid_median": 0.188,
+ "dist_rigid_p90": 0.561,
+ "dist_rigid_max": 1.363,
+ "note": "分数越小越像，认对时约 0.16~0.29，超过 0.45 说明和规则差异大（照样强制校正）；第一第二差不到 0.02 时可 --track 指定"
+}

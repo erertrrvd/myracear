@@ -1,0 +1,392 @@
+#!/usr/bin/python3
+"""实体化障碍层：把 SLAM 原图 /map 里淡、零散的锥桶点画成实心圆，发布 /map_solid。只用来看。
+
+为什么需要：slam_toolbox 每格按“命中 / 穿过”的比例判障碍，车快时锥桶只被扫到一两次，
+在 /map 里只剩零散一两个点，看起来淡、模糊。
+
+做法：
+  1. 位置只用 SLAM 原图 /map。SLAM 修正位姿（回环、里程计漂移）后会重新摆放所有历史扫描，
+     原图始终是对的；本节点不自己累计点的位置。
+     （第一版自己按当时的位姿累计点，实车里程计朝向漂了 20° 多，SLAM 往回拉之后旧的点还留在
+      原处，画出大片不存在的黑块和斜线，所以改成这样。）
+  2. 在原图里找“小而孤立”的障碍点团：相邻（1 格内）的障碍格连成一团，团的大小不超过
+     cone_max_size，且外环（离锥桶边缘 0.15~0.40 m）里别的障碍格不超过 ring_max（墙、
+     大物体的碎片不满足）。把这团点清掉，在它的中心画一个实心圆。墙和其他障碍保持原样。
+  3. 锥桶半径：订阅 /scan_pc，近处单帧里的短段（锥桶的一段圆弧）做圆拟合，取中位数。
+     单帧拟合只用一帧内的相对形状，和位姿无关，不受漂移影响；会移动的物体（人腿）跨帧
+     跟踪后排除。样本不够时用 cone_r_default。
+  4. 每 publish_period 秒发布一次；半径、锥桶数等写到 <map_dir>/.run<N>-solid.json，
+     save_mapping 保存时一起存档。
+
+用法（launch 里自动启动）：obstacle_layer <map_dir> <run_index> [--ros-args -p ...]
+"""
+import json
+import math
+import sys
+from pathlib import Path
+
+import numpy as np
+import rclpy
+from nav_msgs.msg import OccupancyGrid
+from rclpy.node import Node
+from rclpy.duration import Duration
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time
+from sensor_msgs.msg import LaserScan
+from tf2_ros import Buffer, TransformListener
+
+
+def yaw_of(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+def fit_circle(pts):
+    """最小二乘圆拟合（Kasa 初值 + Gauss-Newton），返回 (cx, cy, r, rms)；退化返回 None。
+    Kasa 在只看到一段圆弧时有偏差，Gauss-Newton 直接最小化“点到圆周的距离”。"""
+    if len(pts) < 5:
+        return None
+    x, y = pts[:, 0], pts[:, 1]
+    a = np.column_stack([x, y, np.ones_like(x)])
+    try:
+        sol, *_ = np.linalg.lstsq(a, x * x + y * y, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    cx, cy = sol[0] / 2, sol[1] / 2
+    r2 = sol[2] + cx * cx + cy * cy
+    if r2 <= 0:
+        return None
+    r = math.sqrt(r2)
+    for _ in range(10):
+        dx, dy = x - cx, y - cy
+        dist = np.hypot(dx, dy)
+        if np.any(dist < 1e-9):
+            break
+        jac = np.column_stack([-dx / dist, -dy / dist, -np.ones_like(dist)])
+        try:
+            step, *_ = np.linalg.lstsq(jac, -(dist - r), rcond=None)
+        except np.linalg.LinAlgError:
+            break
+        cx, cy, r = cx + step[0], cy + step[1], r + step[2]
+        if r <= 0:
+            return None
+        if np.max(np.abs(step)) < 1e-5:
+            break
+    rms = float(np.sqrt(np.mean((np.hypot(x - cx, y - cy) - r) ** 2)))
+    return float(cx), float(cy), float(r), rms
+
+
+def components(occ, label=None):
+    """8 邻接连通的障碍团，返回 [(行数组, 列数组)]。只用 numpy + 栈，不依赖 scipy。
+    传入 label（与 occ 同形状、全 -1 的 int32 数组）时，顺便写入每格所属团的编号。"""
+    h, w = occ.shape
+    if label is None:
+        label = np.full(occ.shape, -1, np.int32)
+    out = []
+    for j0, i0 in zip(*np.nonzero(occ)):
+        if label[j0, i0] >= 0:
+            continue
+        k = len(out)
+        label[j0, i0] = k
+        stack, js, is_ = [(j0, i0)], [], []
+        while stack:
+            j, i = stack.pop()
+            js.append(j)
+            is_.append(i)
+            for dj in (-1, 0, 1):
+                for di in (-1, 0, 1):
+                    jj, ii = j + dj, i + di
+                    if 0 <= jj < h and 0 <= ii < w and occ[jj, ii] and label[jj, ii] < 0:
+                        label[jj, ii] = k
+                        stack.append((jj, ii))
+        out.append((np.array(js), np.array(is_)))
+    return out
+
+
+def outside_unknown(unknown):
+    """和地图外边界连通的未知格（房间外）。被空地包住的小块未知（锥桶背后的“阴影”）不算。
+    从边界上的未知格开始，在未知格里反复向四周扩，直到不再变化。"""
+    reach = np.zeros_like(unknown)
+    reach[0, :], reach[-1, :], reach[:, 0], reach[:, -1] = unknown[0, :], unknown[-1, :], unknown[:, 0], unknown[:, -1]
+    while True:
+        grown = reach.copy()
+        grown[1:, :] |= reach[:-1, :]
+        grown[:-1, :] |= reach[1:, :]
+        grown[:, 1:] |= reach[:, :-1]
+        grown[:, :-1] |= reach[:, 1:]
+        grown &= unknown
+        if np.array_equal(grown, reach):
+            return reach
+        reach = grown
+
+
+def solidify(grid, res, radius, cone_max_size=0.35, ring_max=2, ring_free_min=0.6, edge_margin=1.0,
+             wall_min_size=3.0):
+    """grid：OccupancyGrid 数据（h x w，int8，100 障碍 / 0 空闲 / -1 未知），行 0 = y 最小。
+    只加工赛道上的锥桶，边缘保持原图：
+      锥桶 = 小障碍团（<= cone_max_size）
+           + 离墙（长度 > wall_min_size 的障碍）、离房间外的未知区域（和地图边界连通的）都超过
+             edge_margin（靠边的点团不动，按原图；锥桶背后被空地包住的小块“阴影”未知不算边缘）
+           + 外环里别的障碍格 <= ring_max + 外环里已探明空闲格 >= ring_free_min。
+    返回 (新栅格, 锥桶列表[(列中心, 行中心, 团格数)], 没加工的小团数)。"""
+    out = grid.copy()
+    h, w = grid.shape
+    occ = grid == 100
+    max_cells = cone_max_size / res
+    # 相距 1 个空格以内的碎块算同一团：淡的锥桶常被拆成两三块，不合并的话自己的碎块会落进自己的外环
+    grow = occ.copy()
+    grow[1:, :] |= occ[:-1, :]
+    grow[:-1, :] |= occ[1:, :]
+    grow[:, 1:] |= grow[:, :-1].copy()
+    grow[:, :-1] |= grow[:, 1:].copy()
+    label = np.full(occ.shape, -1, np.int32)
+    comps = []
+    for js, is_ in components(grow, label):
+        keep = occ[js, is_]                     # 团里只留原来真有障碍的格子
+        comps.append((js[keep], is_[keep]))
+    own = np.where(occ, label, -1)              # 每个障碍格属于哪一团
+    size = lambda c: max(c[0].max() - c[0].min(), c[1].max() - c[1].min()) + 1
+    small = [(k, c) for k, c in enumerate(comps) if size(c) <= max_cells]
+    outside = outside_unknown(grid == -1)
+    edge = outside.copy()                       # 边缘 = 房间外的未知 + 墙
+    # 离房间外未知 edge_margin 以内的格子（用来判断中等物体是不是贴着外边）
+    near_out = outside.copy()
+    for _ in range(int(edge_margin / res)):
+        g = near_out.copy()
+        g[1:, :] |= near_out[:-1, :]
+        g[:-1, :] |= near_out[1:, :]
+        g[:, 1:] |= near_out[:, :-1]
+        g[:, :-1] |= near_out[:, 1:]
+        near_out = g
+    for c in comps:
+        s = size(c) * res
+        # 长墙；或贴着房间外边的中等物体（墙的断块、门框，>= 0.4 m）。房间中间的隔板、箱子不算
+        if s > wall_min_size or (s >= 0.4 and near_out[c].any()):
+            edge[c] = True
+    em = int(edge_margin / res)
+    ee = np.arange(-em, em + 1)
+    edi, edj = np.meshgrid(ee, ee)
+    in_disk = np.hypot(edi, edj) <= em
+    edi, edj = edi[in_disk], edj[in_disk]
+    # 外环 = 锥桶边缘外 0.08~0.25 m。实车赛道内圈锥桶间距只有 0.5~0.6 m，外环再宽会把邻居锥桶
+    # 算进来；杂物堆（门口那种）别的小点在 0.22~0.34 m 内
+    rr = np.arange(-int((radius + 0.25) / res) - 1, int((radius + 0.25) / res) + 2)
+    di, dj = np.meshgrid(rr, rr)
+    dist = np.hypot(di, dj) * res
+    ring = (dist >= radius + 0.08) & (dist <= radius + 0.25)
+    ri, rj = di[ring], dj[ring]
+    disk = dist <= radius + 0.5 * res          # 和圆有重叠的格子都涂黑：半径 8 cm、格子 5 cm 时是 3x3
+    dkj, dki = dj[disk], di[disk]
+    cones, rejected = [], 0
+    for k, (js, is_) in small:
+        cj, ci = float(js.mean()), float(is_.mean())
+        j, i = int(round(cj)), int(round(ci))
+        ej, ei = j + edj, i + edi
+        m = (ej >= 0) & (ei >= 0) & (ej < h) & (ei < w)
+        if edge[ej[m], ei[m]].any() or not m.all():
+            rejected += 1                       # 靠边（离墙 / 未探明 / 地图边界太近）：按原图，不加工
+            continue
+        rj_, ri_ = j + rj, i + ri
+        m = (rj_ >= 0) & (ri_ >= 0) & (rj_ < h) & (ri_ < w)
+        lab = own[rj_[m], ri_[m]]
+        if int(((lab >= 0) & (lab != k)).sum()) > ring_max:
+            rejected += 1                       # 外环有别的团的障碍：杂物堆、墙或大物体的碎片，不当锥桶
+            continue
+        if float((grid[rj_[m], ri_[m]] == 0).sum()) < ring_free_min * len(ri):
+            rejected += 1                       # 周围大多没探明：房间外 / 射线边缘的噪点
+            continue
+        cones.append((ci, cj, len(js)))
+    for ci, cj, _ in cones:                     # 先全部判断完再改图，免得画的圆影响别的团的判断
+        j, i = int(round(cj)), int(round(ci))
+        # 清掉这一团（和周围 0.25 m 内零散的障碍格），再画干净的实心圆；只在附近小窗口里算
+        k = int((radius + 0.25) / res) + 2
+        j0, j1, i0, i1 = max(j - k, 0), min(j + k + 1, h), max(i - k, 0), min(i + k + 1, w)
+        win = out[j0:j1, i0:i1]                 # 视图，改它就是改 out
+        near = np.hypot(np.arange(i0, i1)[None, :] - ci, np.arange(j0, j1)[:, None] - cj) * res <= radius + 0.25
+        win[near & (win == 100)] = 0
+        dj_, di_ = j + dkj, i + dki
+        m = (dj_ >= 0) & (di_ >= 0) & (dj_ < h) & (di_ < w)
+        out[dj_[m], di_[m]] = 100
+    return out, cones, rejected
+
+
+class Track:
+    """短段的跨帧跟踪，只用来排除会移动的物体（人腿）的半径样本。"""
+    __slots__ = ('anchor', 'center', 'last', 'moved', 'scan_r')
+
+    def __init__(self, center, now):
+        self.anchor = center.copy()
+        self.center = center.copy()
+        self.last = now
+        self.moved = False
+        self.scan_r = []
+
+
+class ObstacleLayer(Node):
+    def __init__(self, map_dir, run_index):
+        super().__init__('obstacle_layer')
+        p = lambda n, d: self.declare_parameter(n, d).value
+        self.odom_frame = p('odom_frame', 'odom_pc')
+        self.max_range = float(p('max_range', 8.0))
+        self.seg_gap = float(p('seg_gap', 0.15))             # 相邻点距离超过它就断开成两段
+        self.small_max = float(p('small_max', 0.35))         # 段长度不超过它 = 可能是锥桶
+        self.fit_range = float(p('fit_range', 2.5))          # 只用这个距离以内的一帧拟合半径
+        self.gate = float(p('gate', 0.30))                   # 跨帧关联距离
+        self.move_thresh = float(p('move_thresh', 0.30))     # 相对首次位置移动超过它 = 运动物体
+        self.track_ttl = int(p('track_ttl', 30))             # 多少帧没看到就丢掉这条跟踪（防漂移累积）
+        self.r_min = float(p('cone_r_min', 0.03))
+        self.r_max = float(p('cone_r_max', 0.30))
+        self.r_default = float(p('cone_r_default', 0.08))    # 半径样本不够时用
+        self.min_samples = int(p('min_radius_samples', 20))
+        self.cone_max_size = float(p('cone_max_size', 0.35))  # 原图里点团最大尺寸（米），超过不当锥桶
+        # 锥桶外环（离边缘 0.08~0.25 m）里最多允许几个“别的团”的障碍格；杂物堆、墙的碎片会超过
+        self.ring_max = int(p('ring_max', 2))
+        self.ring_free_min = float(p('ring_free_min', 0.6))  # 外环里已探明空闲格至少占这么多
+        self.edge_margin = float(p('edge_margin', 1.0))      # 离墙 / 未探明区域这么近的点团不加工（按原图）
+        self.wall_min_size = float(p('wall_min_size', 3.0))  # 长度超过它的障碍才算墙（中间的隔板、箱子不算）
+        self.period = float(p('publish_period', 1.0))
+
+        self.sidecar = Path(map_dir) / f'.run{run_index}-solid.json'
+        self.tracks = []
+        self.samples = []                     # 已确认来自静止物体的单帧半径
+        self.frame = 0
+        self.slam_map = None
+        self.stats = dict(scans=0, moved_tracks=0, tf_miss=0)
+
+        self.tf = Buffer(cache_time=Duration(seconds=10))
+        TransformListener(self.tf, self)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.pub = self.create_publisher(OccupancyGrid, '/map_solid', latched)
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, latched)
+        self.create_subscription(LaserScan, '/scan_pc', self.on_scan, qos_profile_sensor_data)
+        self.create_timer(self.period, self.publish)
+        self.get_logger().info(f'实体化障碍层启动：/map -> /map_solid，记录 {self.sidecar}')
+
+    def on_map(self, msg):
+        self.slam_map = msg
+
+    def on_scan(self, msg):
+        """半径拟合在单帧的雷达坐标系里做（和位姿无关）。判断会不会动的短时跟踪在里程计坐标系
+        odom_pc 里做：每条跟踪最多活 track_ttl 帧（约 3 s），这么短时间里程计漂移很小，
+        长期漂移不会累积进来。odom_pc->雷达 由 scan_tf_bridge 按扫描时间戳发布，一定查得到。"""
+        self.stats['scans'] += 1
+        self.frame += 1
+        stamp = Time.from_msg(msg.header.stamp)
+        if not self.tf.can_transform(self.odom_frame, msg.header.frame_id, stamp):
+            self.stats['tf_miss'] += 1
+            return
+        t = self.tf.lookup_transform(self.odom_frame, msg.header.frame_id, stamp).transform
+        sx, sy, syaw = t.translation.x, t.translation.y, yaw_of(t.rotation)
+        cs, sn = math.cos(syaw), math.sin(syaw)
+        r = np.asarray(msg.ranges, dtype=np.float64)
+        if len(r) == 0:
+            return
+        ang = msg.angle_min + msg.angle_increment * np.arange(len(r))
+        ok = np.isfinite(r) & (r > max(msg.range_min, 0.05)) & (r < min(msg.range_max, self.max_range))
+        px, py = r * np.cos(ang), r * np.sin(ang)
+        idx = np.flatnonzero(ok)
+        if len(idx) == 0:
+            return
+        segs, cur = [], [idx[0]]
+        for a, b in zip(idx[:-1], idx[1:]):
+            if b - a <= 2 and math.hypot(px[b] - px[a], py[b] - py[a]) <= self.seg_gap:
+                cur.append(b)
+            else:
+                segs.append(cur)
+                cur = [b]
+        segs.append(cur)
+        for sg in segs:
+            pts = np.column_stack([px[sg], py[sg]])        # 雷达坐标系
+            if len(pts) < 2 or float(np.hypot(*(pts[-1] - pts[0]))) > self.small_max:
+                continue
+            lc = pts.mean(axis=0)
+            center = np.array([sx + cs * lc[0] - sn * lc[1], sy + sn * lc[0] + cs * lc[1]])   # odom_pc
+            best, bd = None, self.gate
+            for tr in self.tracks:
+                d = float(np.hypot(*(tr.center - center)))
+                if d < bd:
+                    best, bd = tr, d
+            if best is None:
+                best = Track(center, self.frame)
+                self.tracks.append(best)
+            best.center = center
+            best.last = self.frame
+            if not best.moved and float(np.hypot(*(center - best.anchor))) > self.move_thresh:
+                best.moved = True                   # 人在走：这条跟踪的半径样本不用
+                self.stats['moved_tracks'] += 1
+            if len(pts) >= 8 and float(np.hypot(*lc)) < self.fit_range:
+                f = fit_circle(pts)
+                if f and self.r_min <= f[2] <= self.r_max and f[3] < 0.015:
+                    # 只收锥桶那样“凸向雷达”的圆弧：圆心在点的后面（离雷达更远），且点至少覆盖
+                    # 圆的 60°。墙角（凹）、近乎平的墙段拟合出的大圆不满足，免得把半径带大
+                    # （实车刚开始建图时出现过特别大的圆）
+                    behind = math.hypot(f[0], f[1]) > float(np.mean(np.hypot(pts[:, 0], pts[:, 1])))
+                    a = np.arctan2(pts[:, 1] - f[1], pts[:, 0] - f[0])
+                    span = math.degrees(float(np.ptp(np.unwrap(np.sort(a)))))
+                    if behind and span >= 60:
+                        best.scan_r.append(f[2])
+        # 丢掉一段时间没看到的跟踪：它们的半径样本交给静止判断
+        keep = []
+        for tr in self.tracks:
+            if self.frame - tr.last <= self.track_ttl:
+                keep.append(tr)
+            elif not tr.moved and len(tr.scan_r) >= 3:
+                self.samples.extend(tr.scan_r[:20])
+                del self.samples[:-2000]
+        self.tracks = keep
+
+    def radius(self):
+        pool = self.samples + [r for t in self.tracks if not t.moved and len(t.scan_r) >= 3
+                               for r in t.scan_r[:20]]
+        if len(pool) >= self.min_samples:
+            return float(np.median(pool)), len(pool)
+        return self.r_default, len(pool)
+
+    def publish(self):
+        base = self.slam_map
+        if base is None:
+            return
+        info = base.info
+        grid = np.array(base.data, dtype=np.int8).reshape(info.height, info.width)
+        rad, n = self.radius()
+        out, cones, rejected = solidify(grid, info.resolution, rad, self.cone_max_size,
+                                        self.ring_max, self.ring_free_min, self.edge_margin,
+                                        self.wall_min_size)
+        msg = OccupancyGrid()
+        msg.header.frame_id = base.header.frame_id or 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.info = info
+        msg.data = out.ravel().tolist()
+        self.pub.publish(msg)
+        ox, oy, res = info.origin.position.x, info.origin.position.y, info.resolution
+        record = dict(cone_radius=rad, radius_samples=n, cone_radius_default=self.r_default,
+                      cones=len(cones), not_isolated=rejected, scans=self.stats['scans'],
+                      moved_tracks=self.stats['moved_tracks'], tf_miss=self.stats['tf_miss'],
+                      cone_centers=[[round(ox + (ci + 0.5) * res, 3), round(oy + (cj + 0.5) * res, 3), k]
+                                    for ci, cj, k in cones])
+        try:
+            tmp = self.sidecar.with_suffix('.tmp')
+            tmp.write_text(json.dumps(record, ensure_ascii=False), encoding='utf-8')
+            tmp.replace(self.sidecar)
+        except OSError:
+            pass
+
+
+def main():
+    args = rclpy.utilities.remove_ros_args(sys.argv)
+    if len(args) < 3:
+        print('用法：obstacle_layer <map_dir> <run_index>')
+        return 2
+    rclpy.init(args=sys.argv)
+    node = ObstacleLayer(args[1], args[2])
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

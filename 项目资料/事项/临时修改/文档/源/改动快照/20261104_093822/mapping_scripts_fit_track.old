@@ -1,0 +1,343 @@
+#!/usr/bin/python3
+"""建图后处理：把描黑后的地图和比赛规则里的 4 种赛道（A/B/C/D，随机抽一种）拟合并校正形状。
+
+输入：<趟目录>/solid.json 的锥桶中心（solidify_map 生成）、map_solid.pgm（没有就用 map.pgm）。
+做法：
+  1. 赛道模板（规则图，单位 m，原点在赛道外框左下角，x 向右 0~16.8，y 向上 0~5.5）：
+     外圈（蓝锥桶）= 两头半径 2.75 m 半圆 + 上下直线；内圈（红锥桶）= 半径 1.25 m，车道宽 1.5 m。
+     A：上边左半段是向下凹的弯（规则图里 90° / 45° 那段），右半段是 135° 折线区（只有地面黄线、没有锥桶）；
+        左头内圈是直角（红锥桶在 x=1.5 那一列一直到 y=4.0）。B：同 A，左头内圈是圆弧。
+     C：上边左半段是 135° 折线区，右半段是直线；下边右半段是向上凸的弯（A 那段弯转 180°）；左头内圈直角。
+     D：同 C，左头内圈是圆弧。弯的形状是从规则截图里量的锥桶位置（误差约 0.2 m），直线、半圆按标注尺寸。
+  2. 刚性拟合：每种赛道 × 两个初始朝向（锥桶主方向 / 反向），迭代最近点 + 相似变换（平移、旋转、比例
+     限在 0.9~1.1），只用离模板边线近的锥桶（逐步收紧）。分数 = 锥桶到模板边线的截断平均距离
+     + 0.5 × 模板锥桶位置到最近锥桶的截断平均距离（模板有锥桶、地图里没有也扣分）。分数最小的就是这条赛道。
+  3. 非刚性校正：拟合后离模板边线 0.7 m 内的锥桶，配对到边线上的最近点，用带平滑的薄板样条把整张地图
+     平滑地拉到模板形状（SLAM 漂移、两圈不重合造成的弯曲被拉直，局部细节跟着锥桶走）。
+输出（同一趟目录，原图不动）：
+  map_track.pgm / .png / .yaml   校正后的地图（模板坐标系，原点在赛道外框左下角外 1 m）
+  track_fit.png                  校正后的地图 + 模板边线（蓝外圈、红内圈、黄折线区）+ 校正后的锥桶（绿）
+  track_fit.json                 选中的赛道、4 种赛道的分数、变换、校正前后锥桶到边线的距离
+用法：
+  fit_track <趟目录>                       例：D:/ubuntu/slam/maps/run_20261103_2057_filtered/run1
+  fit_track <趟目录> --track C             只拟合指定赛道（自动选错时用）
+  fit_track <趟目录> --track C --force     分数超过门槛（摆得不标准）也强制校正
+"""
+import argparse
+import json
+import math
+import struct
+import sys
+import zlib
+from pathlib import Path
+
+import numpy as np
+
+L, H = 16.8, 5.5            # 赛道外框长、宽（规则图）
+RO, RI = 2.75, 1.25         # 两头外圈、内圈半径
+XL, XR = RO, L - RO         # 两头半圆圆心 x
+YC = H / 2
+XM = L / 2                  # 上下边分左右两半的分界（规则图里竖虚线 8.4 m）
+SPACING = 1.25              # 锥桶间距（规则图约 1.25~1.3 m）
+RES = 0.05                  # 输出地图分辨率
+# 分数门槛（11-04 假数据：4 种赛道各加 0.1 m 噪声、两头翘 0.35 m 的弯曲、15 个乱点，认对的分数 0.16~0.29；
+# 11-03 练习场地（不是规则里的赛道）0.69~0.79）。超过就不校正，只出对齐叠加图。
+MAX_SCORE = 0.45
+AMBIG = 0.02                # 第一、第二名分数差小于它：提示分不清（A/B、C/D 只差左头内圈直角 / 圆弧）
+PAD = 1.0                   # 输出地图在赛道外框外留的边
+
+# A 上边左半段的弯（从规则截图量的锥桶位置）：外圈蓝、内圈红，x 从 2.75 到 8.4
+DIP_OUT = [(2.75, 5.5), (4.2, 5.13), (4.69, 4.67), (5.05, 4.36), (5.64, 4.31), (6.15, 4.41),
+           (6.67, 4.74), (7.31, 5.26), (8.4, 5.5)]
+DIP_IN = [(2.75, 4.0), (3.2, 3.4), (3.75, 3.25), (4.5, 3.05), (5.5, 2.82), (6.67, 3.08),
+          (7.56, 3.51), (8.4, 4.0)]
+
+
+def arc(cx, cy, r, a0, a1, n=24):
+    a = np.radians(np.linspace(a0, a1, n))
+    return [(cx + r * math.cos(t), cy + r * math.sin(t)) for t in a]
+
+
+def rot180(pts):
+    return [(L - x, H - y) for x, y in pts]
+
+
+def template(name):
+    """返回 dict(cone=[有锥桶的折线...], line=[只画不拟合的黄线...])。"""
+    cone, line = [], []
+    cone.append(arc(XL, YC, RO, 90, 270))                       # 左头外圈
+    cone.append(arc(XR, YC, RO, -90, 90))                       # 右头外圈
+    cone.append(arc(XR, YC, RI, -90, 90))                       # 右头内圈
+    if name in ('A', 'C'):                                      # 左头内圈直角
+        cone.append([(XL, H - RO + RI + 0.0), (1.5, 4.0), (1.5, YC)] + arc(XL, YC, RI, 180, 270)[1:])
+    else:                                                       # 左头内圈圆弧
+        cone.append(arc(XL, YC, RI, 90, 270))
+    chev_o = lambda x0: [(x0, H), (x0 + (XR - XL) / 4, H - 1.17), (x0 + (XR - XL) / 2, H)]
+    chev_i = lambda x0: [(x0, 4.0), (x0 + (XR - XL) / 4, 4.0 - 1.17), (x0 + (XR - XL) / 2, 4.0)]
+    if name in ('A', 'B'):
+        cone += [DIP_OUT, DIP_IN]                               # 上边左半：弯
+        line += [chev_o(XM), chev_i(XM)]                        # 上边右半：折线区（只有黄线）
+        cone += [[(XM, H)], [(XM, 4.0)]]                        # 折线区左端各一个锥桶（右端是半圆端点）
+        cone += [[(XL, 0.0), (XR, 0.0)], [(XL, 1.5), (XR, 1.5)]]   # 下边直线
+    else:
+        line += [chev_o(XL), chev_i(XL)]                        # 上边左半：折线区
+        cone += [[(XL, H)], [(XL, 4.0)], [(XM, H), (XR, H)], [(XM, 4.0), (XR, 4.0)]]
+        cone += [[(XL, 0.0), (XM, 0.0)], [(XL, 1.5), (XM, 1.5)]]   # 下边左半直线
+        cone += [rot180(DIP_OUT), rot180(DIP_IN)]               # 下边右半：弯（A 的弯转 180°）
+    return dict(cone=cone, line=line)
+
+
+def densify(poly, step):
+    """折线按弧长每 step 取一点（含两端）；单点折线原样返回。"""
+    p = np.asarray(poly, float)
+    if len(p) == 1:
+        return p
+    seg = np.hypot(*np.diff(p, axis=0).T)
+    s = np.concatenate([[0], np.cumsum(seg)])
+    n = max(1, int(round(s[-1] / step)))
+    t = np.linspace(0, s[-1], n + 1)
+    return np.column_stack([np.interp(t, s, p[:, 0]), np.interp(t, s, p[:, 1])])
+
+
+def tmpl_points(t):
+    dense = np.vstack([densify(c, 0.05) for c in t['cone']])
+    cones = np.vstack([densify(c, SPACING) for c in t['cone']])
+    # 半圆端点和直线端点重合的去重
+    keep = []
+    for q in cones:
+        if all(math.hypot(*(q - k)) > 0.4 for k in keep):
+            keep.append(q)
+    return dense, np.array(keep)
+
+
+def nearest(src, dst):
+    """src 每点到 dst 最近点：(距离, 下标)。"""
+    d2 = ((src[:, None, :] - dst[None, :, :]) ** 2).sum(-1)
+    i = d2.argmin(1)
+    return np.sqrt(d2[np.arange(len(src)), i]), i
+
+
+def similarity(p, q, free_scale=True):
+    """最小二乘相似变换 q ≈ s R p + t（Umeyama），比例限 0.9~1.1；free_scale=False 时比例固定 1。"""
+    mp, mq = p.mean(0), q.mean(0)
+    a, b = p - mp, q - mq
+    u, sv, vt = np.linalg.svd(b.T @ a / len(p))
+    d = np.sign(np.linalg.det(u @ vt))
+    D = np.diag([1, d])
+    R = u @ D @ vt
+    s = float(np.clip((sv * np.diag(D)).sum() / (a ** 2).sum() * len(p), 0.9, 1.1)) if free_scale else 1.0
+    return s, R, mq - s * R @ mp
+
+
+def apply(T, p):
+    s, R, t = T
+    return (s * (R @ p.T)).T + t
+
+
+def score(pc, dense, tcones):
+    """越小越像。锥桶→边线只取最近的 80%（场边的人、树等乱点不算），模板锥桶→地图锥桶全算（缺了要扣分）。"""
+    d1, _ = nearest(pc, dense)
+    d1 = np.sort(np.minimum(d1, 0.8))[:max(1, int(0.8 * len(d1)))]
+    d2, _ = nearest(tcones, pc)
+    return float(d1.mean() + 0.5 * np.minimum(d2, 1.0).mean())
+
+
+def fit_rigid(cones, dense, tcones):
+    """返回 (分数, 变换)：初始朝向每 20° 试一次（只用主方向会卡在局部最优），取分数最小的。"""
+    c0 = np.median(cones, 0)
+    best = None
+    for a0 in np.radians(np.arange(0, 360, 20)):
+        c, s_ = math.cos(a0), math.sin(a0)
+        R = np.array([[c, -s_], [s_, c]])
+        T = (1.0, R, np.array([L / 2, H / 2]) - R @ c0)
+        # 前 25 次比例固定 1（一开始就放开比例，外圈锥桶会被吸到内圈线上、整体越缩越小），之后再放开细调
+        for it in range(35):
+            pc = apply(T, cones)
+            d, i = nearest(pc, dense)
+            gate = max(0.3, 1.5 - it * 0.05)                    # 逐步收紧：先粗后细
+            m = d < gate
+            if m.sum() < 8:
+                break
+            T = similarity(cones[m], dense[i[m]], free_scale=it >= 25)
+        sc = score(apply(T, cones), dense, tcones)
+        if best is None or sc < best[0]:
+            best = (sc, T)
+    return best
+
+
+def tps_fit(src, dst, lam):
+    """薄板样条 src -> dst（带平滑 lam），返回求值函数。"""
+    n = len(src)
+    r = np.sqrt(((src[:, None] - src[None]) ** 2).sum(-1))
+    K = np.where(r > 0, r ** 2 * np.log(r + 1e-12), 0.0) + lam * np.eye(n)
+    P = np.column_stack([np.ones(n), src])
+    A = np.zeros((n + 3, n + 3))
+    A[:n, :n], A[:n, n:], A[n:, :n] = K, P, P.T
+    b = np.zeros((n + 3, 2))
+    b[:n] = dst
+    coef = np.linalg.solve(A, b)
+
+    def f(x):
+        out = np.empty_like(x)
+        for k in range(0, len(x), 20000):                       # 分块，省内存
+            xx = x[k:k + 20000]
+            rr = np.sqrt(((xx[:, None] - src[None]) ** 2).sum(-1))
+            U = np.where(rr > 0, rr ** 2 * np.log(rr + 1e-12), 0.0)
+            out[k:k + 20000] = U @ coef[:n] + np.column_stack([np.ones(len(xx)), xx]) @ coef[n:]
+        return out
+    return f
+
+
+def read_map(run_dir):
+    """优先 map_solid（锥桶已描成实心圆），返回 (灰度数组 第0行=y最大, 分辨率, 原点)。"""
+    name = 'map_solid' if (run_dir / 'map_solid.pgm').is_file() else 'map'
+    info = {}
+    for ln in (run_dir / f'{name}.yaml').read_text(encoding='utf-8').splitlines():
+        if ':' in ln:
+            k, v = ln.split(':', 1)
+            info[k.strip()] = v.strip()
+    res = float(info['resolution'])
+    origin = [float(v) for v in info['origin'].strip('[]').split(',')]
+    data = (run_dir / f'{name}.pgm').read_bytes()
+    tok, pos = [], 0
+    while len(tok) < 4:
+        while data[pos:pos + 1].isspace():
+            pos += 1
+        if data[pos:pos + 1] == b'#':
+            pos = data.index(b'\n', pos) + 1
+            continue
+        end = pos
+        while not data[end:end + 1].isspace():
+            end += 1
+        tok.append(data[pos:end])
+        pos = end
+    w, h = int(tok[1]), int(tok[2])
+    img = np.frombuffer(data[pos + 1:pos + 1 + w * h], np.uint8).reshape(h, w)
+    return img, res, origin
+
+
+def png(path, img):
+    """灰度（2 维）或 RGB（3 维）PNG，只用标准库。"""
+    h, w = img.shape[:2]
+    ct = 0 if img.ndim == 2 else 2
+    def chunk(tag, d):
+        return struct.pack('>I', len(d)) + tag + d + struct.pack('>I', zlib.crc32(tag + d) & 0xffffffff)
+    rows = b''.join(b'\x00' + img[r].tobytes() for r in range(h))
+    path.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, ct, 0, 0, 0))
+                     + chunk(b'IDAT', zlib.compress(rows, 9)) + chunk(b'IEND', b''))
+
+
+def run(run_dir, track=None, force=False, log=print):
+    """拟合一趟地图；返回 track_fit.json 的内容（锥桶太少返回 None）。force：分数超过门槛也校正。"""
+    run_dir = Path(run_dir)
+    sj = json.loads((run_dir / 'solid.json').read_text(encoding='utf-8'))
+    cones = np.array([c[:2] for c in sj.get('cone_centers', [])], float)
+    if len(cones) < 15:
+        log(f'赛道拟合跳过：描黑只认出 {len(cones)} 个锥桶（少于 15 个）')
+        return None
+
+    results = {}
+    for name in ([track] if track else ['A', 'B', 'C', 'D']):
+        t = template(name)
+        dense, tcones = tmpl_points(t)
+        sc, T = fit_rigid(cones, dense, tcones)
+        results[name] = dict(score=sc, T=T, t=t, dense=dense, tcones=tcones)
+    name = min(results, key=lambda k: results[k]['score'])
+    r = results[name]
+    T, dense = r['T'], r['dense']
+
+    # 非刚性：离边线 0.7 m 内的锥桶配对到边线最近点。分数太差（不像规则赛道）就不校正，只做刚性对齐
+    pc = apply(T, cones)
+    d, i = nearest(pc, dense)
+    m = d < 0.7
+    good = (r['score'] <= MAX_SCORE or force) and m.sum() >= 15
+    if good:
+        src, dst = pc[m], dense[i[m]]
+        fwd = tps_fit(src, dst, lam=1.0)
+        inv = tps_fit(dst, src, lam=1.0)                        # 输出图逐格反查原图用
+    else:
+        fwd = inv = lambda x: x
+    d_after, _ = nearest(fwd(pc[m]), dense) if m.any() else (np.zeros(1), None)
+
+    # 校正后的地图：模板坐标系，每格反查原图
+    img, res, origin = read_map(run_dir)
+    W, Hh = int(round((L + 2 * PAD) / RES)), int(round((H + 2 * PAD) / RES))
+    gx, gy = np.meshgrid(-PAD + (np.arange(W) + 0.5) * RES, -PAD + (np.arange(Hh) + 0.5) * RES)
+    q = np.column_stack([gx.ravel(), gy.ravel()])
+    p = inv(q)                                                  # 刚性拟合后的坐标
+    s, R, tt = T
+    mp = (R.T @ ((p - tt) / s).T).T                             # 原地图坐标（m）
+    ci = np.floor((mp[:, 0] - origin[0]) / res).astype(int)
+    cj = np.floor((mp[:, 1] - origin[1]) / res).astype(int)
+    ok = (ci >= 0) & (ci < img.shape[1]) & (cj >= 0) & (cj < img.shape[0])
+    out = np.full(len(q), 205, np.uint8)
+    out[ok] = img[img.shape[0] - 1 - cj[ok], ci[ok]]
+    out = out.reshape(Hh, W)[::-1]                              # 第 0 行 = y 最大
+    if good:
+        (run_dir / 'map_track.pgm').write_bytes(f'P5\n{W} {Hh}\n255\n'.encode() + out.tobytes())
+        png(run_dir / 'map_track.png', out)
+        (run_dir / 'map_track.yaml').write_text(
+            f'image: map_track.pgm\nresolution: {RES}\norigin: [{-PAD}, {-PAD}, 0.0]\n'
+            'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n', encoding='utf-8')
+    else:
+        for n_ in ('map_track.pgm', 'map_track.png', 'map_track.yaml'):   # 上次留下的校正图删掉，免得误用
+            (run_dir / n_).unlink(missing_ok=True)
+
+    # 叠加图：放大 2 倍，模板边线 + 校正后的锥桶
+    k = 2
+    rgb = np.repeat(np.repeat(np.stack([out] * 3, -1), k, 0), k, 1).copy()
+    def put(pts, color, rad):
+        for x, y in pts:
+            u = int((x + PAD) / RES * k)
+            v = int((H + PAD - y) / RES * k)
+            if rad <= u < rgb.shape[1] - rad and rad <= v < rgb.shape[0] - rad:   # 图外的点不画（负下标会切到整行）
+                rgb[v - rad:v + rad + 1, u - rad:u + rad + 1] = color
+    t = r['t']
+    def axis_dist(x, y):                                        # 到两头圆心连线的距离：外圈 2.75，内圈 ≤ 1.8
+        return math.hypot(x - min(max(x, XL), XR), y - YC)
+    for poly in t['cone']:
+        outer = max(axis_dist(x, y) for x, y in poly) > 2.0
+        put(densify(poly, 0.02), (40, 90, 230) if outer else (220, 40, 40), 1)
+    for poly in t['line']:
+        put(densify(poly, 0.02), (230, 190, 0), 1)
+    put(fwd(pc), (0, 170, 0), 3)
+    png(run_dir / 'track_fit.png', rgb)
+
+    others = sorted((v['score'], n) for n, v in results.items() if n != name)
+    ambiguous = bool(others) and others[0][0] - r['score'] < AMBIG
+    rec = dict(track=name, corrected=bool(good), ambiguous=ambiguous, second=others[0][1] if others else None,
+               score=round(r['score'], 3),
+               scores={n: round(v['score'], 3) for n, v in results.items()},
+               scale=round(T[0], 4), rotation_deg=round(math.degrees(math.atan2(T[1][1, 0], T[1][0, 0])), 2),
+               cones=len(cones), matched=int(m.sum()),
+               dist_rigid_median=round(float(np.median(d[m])), 3), dist_rigid_p90=round(float(np.percentile(d[m], 90)), 3),
+               dist_after_median=round(float(np.median(d_after)), 3),
+               note=f'分数越小越像，认对时约 0.16~0.29；超过 {MAX_SCORE} 不校正；第一第二差不到 {AMBIG} 时可 --track 指定')
+    (run_dir / 'track_fit.json').write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding='utf-8')
+    head = (f'赛道拟合：最像赛道 {name}（分数 {r["score"]:.3f}'
+            + (f'，其次 {others[0][1]} {others[0][0]:.3f}' if others else '') + f'）；比例 {T[0]:.3f}；')
+    if good:
+        log(head + f'{int(m.sum())}/{len(cones)} 个锥桶用来校正，离模板边线中位 {rec["dist_rigid_median"]:.2f} m → '
+            f'{rec["dist_after_median"]:.2f} m' + (f'；和 {others[0][1]} 分不清，不对就加 --track 重做' if ambiguous else '')
+            + f'。校正后的地图：{run_dir / "map_track.png"}，叠加图：{run_dir / "track_fit.png"}')
+    else:
+        log(head + f'分数超过 {MAX_SCORE}，和规则里 4 种赛道都不像，没有校正（只出对齐叠加图 {run_dir / "track_fit.png"}）')
+    return rec
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('run_dir')
+    ap.add_argument('--track', choices=['A', 'B', 'C', 'D'])
+    ap.add_argument('--force', action='store_true', help='分数超过门槛（不像规则赛道）也校正')
+    a = ap.parse_args()
+    run(a.run_dir, a.track, a.force)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f'赛道拟合失败：{exc}', file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,10 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-10-19-05-30-887614-DESKTOP-7JE3QFM-21104
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\diagnose_20261110_subset\key2_imu_only_slow_v3；run_index=1；SLAM async；位姿来源 IMU 航向（无轮速）；去畸变 关
+[INFO] [python.exe-1]: process started with pid [10248]
+[INFO] [async_slam_toolbox_node.EXE-2]: process started with pid [9504]
+[INFO] [python.exe-3]: process started with pid [6396]
+[async_slam_toolbox_node.EXE-2] [INFO] [1794308731.388037700] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-2] [INFO] [1794308731.388210200] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.
+[async_slam_toolbox_node.EXE-2] Registering sensor: [Custom Described Lidar]
+[ERROR] [async_slam_toolbox_node.EXE-2]: process has died [pid 9504, exit code 3221225725, cmd 'D:\ubuntu\slam\.pixi\envs\default\Library\lib\slam_toolbox\async_slam_toolbox_node.EXE --ros-args -r __node:=slam_toolbox --params-file C:\Users\lzc2\Desktop\my_racecar（复件）\mapping\config\mapper_native.yaml --params-file C:\Users\lzc2\AppData\Local\Temp\launch_params_4dgw8qgt'].

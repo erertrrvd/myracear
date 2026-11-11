@@ -1,0 +1,39 @@
+* text=auto eol=lf
+
+# ---- C/C++ ----
+*.cpp    text eol=lf
+*.cc     text eol=lf
+*.hpp    text eol=lf
+*.h      text eol=lf
+
+# ---- ROS 2 接口定义 ----
+*.msg    text eol=lf
+*.srv    text eol=lf
+*.action text eol=lf
+
+# ---- ROS 2 / 构建配置 ----
+package.xml      text eol=lf
+CMakeLists.txt   text eol=lf
+*.cmake          text eol=lf
+*.xml            text eol=lf
+*.yaml           text eol=lf
+*.yml            text eol=lf
+*.json           text eol=lf
+*.urdf           text eol=lf
+*.xacro          text eol=lf
+*.rviz           text eol=lf
+
+# ---- 脚本（shebang 对 CRLF 敏感，必须 LF）----
+*.py     text eol=lf
+*.sh     text eol=lf
+*.bash   text eol=lf
+
+# ---- 数据/二进制：禁止任何转换 ----
+*.csv    -text
+*.pgm    -text
+*.png    -text
+*.jpg    -text
+*.pdf    -text
+*.bag    -text
+*.db3    -text
+*.mcap   -text

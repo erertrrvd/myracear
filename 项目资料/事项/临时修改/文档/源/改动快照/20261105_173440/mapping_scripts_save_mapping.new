@@ -1,0 +1,224 @@
+#!/usr/bin/python3
+"""Save one finished run only after both map formats have passed validation."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import sys
+import struct
+import tempfile
+import zlib
+from datetime import datetime, timezone
+from pathlib import Path
+
+import rclpy
+from nav_msgs.msg import OccupancyGrid
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+import math
+
+from slam_toolbox.srv import SerializePoseGraph
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class Saver(Node):
+    def __init__(self):
+        super().__init__('mapping_run_saver')
+        self.grid = None
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                         reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, qos)
+        self.solid = None                      # obstacle_layer 的实体化图（没开就没有）
+        self.create_subscription(OccupancyGrid, '/map_solid', self.on_solid, qos)
+        # vote_map 的两种投票地图（没开 vote_map 就没有）：只投票 / 投票 + 地面剔除
+        self.votes = {}
+        for topic, name in (('/map_vote_raw', 'map_vote_raw'), ('/map_vote', 'map_vote')):
+            self.create_subscription(OccupancyGrid, topic,
+                                     lambda m, n=name: self.votes.__setitem__(n, m), qos)
+        self.graph_client = self.create_client(SerializePoseGraph, '/slam_toolbox/serialize_map')
+
+    def on_map(self, msg):
+        self.grid = msg
+
+    def on_solid(self, msg):
+        self.solid = msg
+
+    def call(self, client, request):
+        if not client.wait_for_service(timeout_sec=10):
+            raise RuntimeError(f'服务不可用：{client.srv_name}')
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=45)
+        if not future.done() or future.exception():
+            raise RuntimeError(f'服务失败或超时：{client.srv_name} {future.exception() if future.done() else ""}')
+        return future.result()
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument('--run-index', type=int, choices=(1, 2, 3), required=True)
+    p.add_argument('--map-dir', required=True)
+    return p.parse_known_args()[0]
+
+
+def write_png(path, width, height, pixels):
+    """8-bit grayscale PNG (viewable in Windows Photos), stdlib only."""
+    def chunk(tag, data):
+        return (struct.pack('>I', len(data)) + tag + data
+                + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff))
+    rows = b''.join(b'\x00' + bytes(pixels[r * width:(r + 1) * width])
+                    for r in range(height))
+    path.write_bytes(b'\x89PNG\r\n\x1a\n'
+                     + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 0, 0, 0, 0))
+                     + chunk(b'IDAT', zlib.compress(rows, 9))
+                     + chunk(b'IEND', b''))
+
+
+def write_occupancy_map(grid, prefix):
+    """Write a standard ROS map pair without invoking nav2_map_server."""
+    width, height = grid.info.width, grid.info.height
+    if width <= 0 or height <= 0 or len(grid.data) != width * height:
+        raise RuntimeError('地图栅格尺寸无效')
+    q = grid.info.origin.orientation
+    yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
+                     1 - 2 * (q.y * q.y + q.z * q.z))
+    pixels = bytearray()
+    for y in range(height - 1, -1, -1):
+        for x in range(width):
+            value = grid.data[y * width + x]
+            pixels.append(205 if value < 0 else round(254 * (1 - value / 100)))
+    with prefix.with_suffix('.pgm').open('wb') as f:
+        f.write(f'P5\n{width} {height}\n255\n'.encode('ascii'))
+        f.write(pixels)
+    write_png(prefix.with_suffix('.png'), width, height, pixels)
+    origin = grid.info.origin.position
+    prefix.with_suffix('.yaml').write_text(
+        f'image: {prefix.name}.pgm\nresolution: {grid.info.resolution:.9g}\n'
+        f'origin: [{origin.x:.9g}, {origin.y:.9g}, {yaw:.9g}]\n'
+        'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n', encoding='utf-8')
+    prefix.with_suffix('.raw').write_bytes(bytes((value + 256) % 256 for value in grid.data))
+
+
+def main():
+    args = parse_args()
+    root = Path(args.map_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    final = root / f'run{args.run_index}'
+    if final.exists():
+        raise RuntimeError(f'已有本趟地图，拒绝覆盖：{final}')
+    rclpy.init()
+    node = Saver()
+    try:
+        for _ in range(50):
+            rclpy.spin_once(node, timeout_sec=0.2)
+            if node.grid is not None:
+                break
+        if node.grid is None:
+            raise RuntimeError('未收到 /map，不能保存')
+        occupied = sum(v >= 65 for v in node.grid.data)
+        if occupied < 20:
+            raise RuntimeError(f'地图有效障碍太少：{occupied}')
+        with tempfile.TemporaryDirectory(prefix=f'.run{args.run_index}-', dir=root) as tmp:
+            staged = Path(tmp)
+            prefix = staged / 'map'
+            graph_req = SerializePoseGraph.Request()
+            graph_req.filename = str(prefix)
+            graph_resp = node.call(node.graph_client, graph_req)
+            if graph_resp.result != SerializePoseGraph.Response.RESULT_SUCCESS:
+                raise RuntimeError(f'位姿图保存失败：{graph_resp.result}')
+            write_occupancy_map(node.grid, prefix)
+            live_log = root / f'.run{args.run_index}-live.jsonl'
+            if live_log.is_file():
+                shutil.copyfile(live_log, staged / 'run.jsonl')
+            else:
+                raise RuntimeError(f'本趟状态日志缺失：{live_log}')
+            names = ['map.posegraph', 'map.data', 'map.pgm', 'map.png', 'map.yaml',
+                     'map.raw', 'run.jsonl']
+            # 实体化图（只用来看）：有 /map_solid 就多存一份 map_solid.*，以及半径、锥桶数记录
+            for _ in range(10):
+                if node.solid is not None:
+                    break
+                rclpy.spin_once(node, timeout_sec=0.2)
+            if node.solid is not None:
+                write_occupancy_map(node.solid, staged / 'map_solid')
+                names += ['map_solid.pgm', 'map_solid.png', 'map_solid.yaml']
+                sidecar = root / f'.run{args.run_index}-solid.json'
+                if sidecar.is_file():
+                    shutil.copyfile(sidecar, staged / 'solid.json')
+                    names.append('solid.json')
+                (staged / 'map_solid.raw').unlink(missing_ok=True)
+            # 两种投票地图：map_vote_raw.*（只投票，挡板 / 地面线都留着）、map_vote.*（投票 + 地面剔除）
+            for _ in range(10):
+                if len(node.votes) == 2:
+                    break
+                rclpy.spin_once(node, timeout_sec=0.2)
+            for name, grid in sorted(node.votes.items()):
+                write_occupancy_map(grid, staged / name)
+                names += [f'{name}.pgm', f'{name}.png', f'{name}.yaml', f'{name}.raw']
+            if len(node.votes) < 2:
+                print('没收到 vote_map 的投票地图（launch 的 vote 关了？），这次只存 SLAM 原图', flush=True)
+            files = {}
+            for name in names:
+                path = staged / name
+                if not path.is_file() or path.stat().st_size == 0:
+                    raise RuntimeError(f'建图结果缺失或为空：{path}')
+                files[name] = {'bytes': path.stat().st_size, 'sha256': digest(path)}
+            metadata = {
+                'run_index': args.run_index,
+                'saved_at_utc': datetime.now(timezone.utc).isoformat(),
+                'occupied_cells': occupied,
+                'map_width': node.grid.info.width,
+                'map_height': node.grid.info.height,
+                'map_resolution': node.grid.info.resolution,
+                'map_origin': {
+                    'x': node.grid.info.origin.position.x,
+                    'y': node.grid.info.origin.position.y,
+                    'yaw': math.atan2(
+                        2 * (node.grid.info.origin.orientation.w * node.grid.info.origin.orientation.z +
+                             node.grid.info.origin.orientation.x * node.grid.info.origin.orientation.y),
+                        1 - 2 * (node.grid.info.origin.orientation.y ** 2 +
+                                 node.grid.info.origin.orientation.z ** 2)),
+                },
+                'files': files,
+            }
+            (staged / 'complete.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')
+            os.rename(staged, final)
+        print(f'第 {args.run_index} 趟建图已完整保存：{final}', flush=True)
+        # 后处理（存完原图再做，失败也不影响已存好的原图）：
+        #   描黑（默认不开实时 obstacle_layer）→ map_solid.*；建图报告 → report.html（描黑图 + 轨迹 + 丢帧 / 突跳结论）
+        def post(script, what, **kw):
+            try:
+                loader = importlib.machinery.SourceFileLoader(
+                    script + '_mod', str(Path(__file__).resolve().parent / script))
+                spec = importlib.util.spec_from_loader(loader.name, loader)
+                mod = importlib.util.module_from_spec(spec)
+                loader.exec_module(mod)
+                getattr(mod, kw.pop('func'))(final, log=lambda m: print(m, flush=True), **kw)
+            except Exception as exc:
+                print(f'{what}失败（原图已存好，不受影响）：{exc}', file=sys.stderr, flush=True)
+        if node.solid is None:
+            post('solidify_map', '描黑后处理', func='run')
+        post('fit_track', '赛道拟合', func='run')                # 和规则 4 种赛道拟合校正 → map_track.*、track_fit.*
+        post('map_report', '建图报告生成', func='report')
+        return 0
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f'保存失败：{exc}', file=sys.stderr, flush=True)
+        sys.exit(1)

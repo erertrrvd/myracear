@@ -1,0 +1,793 @@
+[
+ {
+  "id": "20261007_172400",
+  "time": "2026-10-07 17:24",
+  "label": "建图漂移：mapper 惩罚和回环参数（两个 yaml 同改）",
+  "note": "改动总表原写 10-11；会话备份显示 10-07 17:24 时 mapper.yaml 已是现在的内容；mapper_native.yaml 没有备份，按同一次改动算",
+  "files": {
+   "mapping/config/mapper.yaml": {
+    "old": "20261007_172400\\mapping_config_mapper.yaml.old",
+    "new": "20261007_172400\\mapping_config_mapper.yaml.new",
+    "outside": false
+   },
+   "mapping/config/mapper_native.yaml": {
+    "old": "20261007_172400\\mapping_config_mapper_native.yaml.old",
+    "new": "20261007_172400\\mapping_config_mapper_native.yaml.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261011_120000",
+  "time": "2026-10-11 12:00",
+  "label": "建图漂移：状态日志记录 odom / slam / corr 位姿",
+  "note": "没有会话备份，日期按改动总表；内容 = 现在的文件去掉 10-21 的改动",
+  "files": {
+   "mapping/scripts/mapping_status_logger": {
+    "old": "20261011_120000\\mapping_scripts_mapping_status_logger.old",
+    "new": "20261011_120000\\mapping_scripts_mapping_status_logger.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261017_194100",
+  "time": "2026-10-17 19:41",
+  "label": "快捷键：电脑 PowerShell 配置（第一次存到的版本）",
+  "note": "",
+  "files": {
+   "电脑 PowerShell 配置 Microsoft.PowerShell_profile.ps1": {
+    "old": null,
+    "new": "20261017_194100\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261017_201900",
+  "time": "2026-10-17 20:19",
+  "label": "保存时多存 map.png；快捷键 2 / 3",
+  "note": "",
+  "files": {
+   "mapping/scripts/save_mapping": {
+    "old": "20261017_201900\\mapping_scripts_save_mapping.old",
+    "new": "20261017_201900\\mapping_scripts_save_mapping.new",
+    "outside": false
+   },
+   "电脑 PowerShell 配置 Microsoft.PowerShell_profile.ps1": {
+    "old": "20261017_201900\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.old",
+    "new": "20261017_201900\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261017_205200",
+  "time": "2026-10-17 20:52",
+  "label": "项目约定 CLAUDE.md（新建）",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": null,
+    "new": "20261017_205200\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261019_204100",
+  "time": "2026-10-19 20:41",
+  "label": "实体化障碍层 /map_solid（launch 的 solid 参数、rviz、保存、-NoSolid、快捷键 4）",
+  "note": "run_slam_windows.ps1 和 10-05 的备份比",
+  "files": {
+   "mapping/scripts/obstacle_layer": {
+    "old": null,
+    "new": "20261019_204100\\mapping_scripts_obstacle_layer.new",
+    "outside": false
+   },
+   "mapping/scripts/save_mapping": {
+    "old": "20261019_204100\\mapping_scripts_save_mapping.old",
+    "new": "20261019_204100\\mapping_scripts_save_mapping.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261019_204100\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261019_204100\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261019_204100\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261019_204100\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "mapping/rviz/slam_mapping.rviz": {
+    "old": "20261019_204100\\mapping_rviz_slam_mapping.rviz.old",
+    "new": "20261019_204100\\mapping_rviz_slam_mapping.rviz.new",
+    "outside": false
+   },
+   "CMakeLists.txt": {
+    "old": "20261019_204100\\CMakeLists.txt.old",
+    "new": "20261019_204100\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261019_204100\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261019_204100\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   },
+   "电脑 PowerShell 配置 Microsoft.PowerShell_profile.ps1": {
+    "old": "20261019_204100\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.old",
+    "new": "20261019_204100\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261021_200200",
+  "time": "2026-10-21 20:02",
+  "label": "抗丢包建图（scan_relay、排队补帧、sync SLAM、车上录包、-Bag 离线重建）",
+  "note": "",
+  "files": {
+   "mapping/scripts/scan_relay": {
+    "old": null,
+    "new": "20261021_200200\\mapping_scripts_scan_relay.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261021_200200\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261021_200200\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "mapping/scripts/mapping_status_logger": {
+    "old": "20261021_200200\\mapping_scripts_mapping_status_logger.old",
+    "new": "20261021_200200\\mapping_scripts_mapping_status_logger.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_vehicle.launch.py": {
+    "old": "20261021_200200\\mapping_launch_distributed_mapping_vehicle.launch.py.old",
+    "new": "20261021_200200\\mapping_launch_distributed_mapping_vehicle.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261021_200200\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261021_200200\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261021_200200\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261021_200200\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "CMakeLists.txt": {
+    "old": "20261021_200200\\CMakeLists.txt.old",
+    "new": "20261021_200200\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261021_200200\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261021_200200\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261021_201600",
+  "time": "2026-10-21 20:16",
+  "label": "view_csv.ps1 第一次存版本（之前的改动没有备份）",
+  "note": "",
+  "files": {
+   "电脑 D:\\ubuntu\\slam\\view_csv.ps1": {
+    "old": null,
+    "new": "20261021_201600\\电脑_D__ubuntu_slam_view_csv.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261021_201700",
+  "time": "2026-10-21 20:17",
+  "label": "代码改动记录加逐行、可折叠的网页版（CLAUDE.md 加一条文档规则）",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261021_201700\\CLAUDE.md.old",
+    "new": "20261021_201700\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261021_204027",
+  "time": "2026-10-21 20:40",
+  "label": "代码改动记录网页版：按模块 → 功能，写要求 / 实现 / 状态 / 文件作用，增删改都显示代码",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261021_204027\\CLAUDE.md.old",
+    "new": "20261021_204027\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261021_205840",
+  "time": "2026-10-21 20:58",
+  "label": "代码改动记录网页版：按模块 → 功能，写要求 / 实现 / 状态 / 文件作用，增删改都显示代码",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261021_205840\\CLAUDE.md.old",
+    "new": "20261021_205840\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261022_201300",
+  "time": "2026-10-22 20:13",
+  "label": "拉回小车红绿灯按需推理、AB 路径；建图改动（抗丢包 + 实体层）提交并上车；文档平时只更新网页",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261022_201300\\CLAUDE.md.old",
+    "new": "20261022_201300\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261101_103450",
+  "time": "2026-11-01 10:34",
+  "label": "拉回小车红绿灯按需推理、AB 路径；建图改动（抗丢包 + 实体层）提交并上车；文档平时只更新网页",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261101_103450\\CLAUDE.md.old",
+    "new": "20261101_103450\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261103_202230",
+  "time": "2026-11-03 20:22",
+  "label": "操场长线偏移：匹配 / 回环参数改回默认；scan_tf_bridge 地面线过滤；描黑改成存图后处理",
+  "note": "",
+  "files": {
+   "CMakeLists.txt": {
+    "old": "20261103_202230\\CMakeLists.txt.old",
+    "new": "20261103_202230\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "mapping/config/mapper.yaml": {
+    "old": "20261103_202230\\mapping_config_mapper.yaml.old",
+    "new": "20261103_202230\\mapping_config_mapper.yaml.new",
+    "outside": false
+   },
+   "mapping/config/mapper_native.yaml": {
+    "old": "20261103_202230\\mapping_config_mapper_native.yaml.old",
+    "new": "20261103_202230\\mapping_config_mapper_native.yaml.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261103_202230\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261103_202230\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261103_202230\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261103_202230\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "mapping/scripts/save_mapping": {
+    "old": "20261103_202230\\mapping_scripts_save_mapping.old",
+    "new": "20261103_202230\\mapping_scripts_save_mapping.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261103_202230\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261103_202230\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "mapping/scripts/solidify_map": {
+    "old": null,
+    "new": "20261103_202230\\mapping_scripts_solidify_map.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261103_202230\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261103_202230\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   },
+   "电脑 PowerShell 配置 Microsoft.PowerShell_profile.ps1": {
+    "old": "20261103_202230\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.old",
+    "new": "20261103_202230\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261103_212649",
+  "time": "2026-11-03 21:26",
+  "label": "建图报告：每趟自动生成 report.html；检测两个里程计",
+  "note": "",
+  "files": {
+   "CMakeLists.txt": {
+    "old": "20261103_212649\\CMakeLists.txt.old",
+    "new": "20261103_212649\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "mapping/scripts/save_mapping": {
+    "old": "20261103_212649\\mapping_scripts_save_mapping.old",
+    "new": "20261103_212649\\mapping_scripts_save_mapping.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261103_212649\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261103_212649\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "mapping/scripts/map_report": {
+    "old": null,
+    "new": "20261103_212649\\mapping_scripts_map_report.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261103_212649\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261103_212649\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261103_215344",
+  "time": "2026-11-03 21:53",
+  "label": "建图报告：每趟自动生成 report.html；检测两个里程计",
+  "note": "",
+  "files": {
+   "CMakeLists.txt": {
+    "old": "20261103_215344\\CMakeLists.txt.old",
+    "new": "20261103_215344\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "launch/move_test.launch.py": {
+    "old": "20261103_215344\\launch_move_test.launch.py.old",
+    "new": "20261103_215344\\launch_move_test.launch.py.new",
+    "outside": false
+   },
+   "launch/odom_move_test.launch.py": {
+    "old": "20261103_215344\\launch_odom_move_test.launch.py.old",
+    "new": "20261103_215344\\launch_odom_move_test.launch.py.new",
+    "outside": false
+   },
+   "launch/save_path.launch.py": {
+    "old": "20261103_215344\\launch_save_path.launch.py.old",
+    "new": "20261103_215344\\launch_save_path.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261103_215344\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261103_215344\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261103_215344\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261103_215344\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_vehicle.launch.py": {
+    "old": "20261103_215344\\mapping_launch_distributed_mapping_vehicle.launch.py.old",
+    "new": "20261103_215344\\mapping_launch_distributed_mapping_vehicle.launch.py.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_relay": {
+    "old": "20261103_215344\\mapping_scripts_scan_relay.old",
+    "new": null,
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261103_215344\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261103_215344\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "scripts/record_seg.py": {
+    "old": "20261103_215344\\scripts_record_seg.py.old",
+    "new": "20261103_215344\\scripts_record_seg.py.new",
+    "outside": false
+   },
+   "CLAUDE.md": {
+    "old": "20261103_215344\\CLAUDE.md.old",
+    "new": "20261103_215344\\CLAUDE.md.new",
+    "outside": false
+   },
+   "mapping/scripts/map_report": {
+    "old": "20261103_215344\\mapping_scripts_map_report.old",
+    "new": "20261103_215344\\mapping_scripts_map_report.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261103_215344\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261103_215344\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261103_215424",
+  "time": "2026-11-03 21:54",
+  "label": "建图报告：每趟自动生成 report.html；检测两个里程计",
+  "note": "",
+  "files": {
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261103_215424\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261103_215424\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261104_091327",
+  "time": "2026-11-04 09:13",
+  "label": "赛道拟合：和规则 A/B/C/D 对齐并校正",
+  "note": "",
+  "files": {
+   "CMakeLists.txt": {
+    "old": "20261104_091327\\CMakeLists.txt.old",
+    "new": "20261104_091327\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "launch/final_start.launch.py": {
+    "old": "20261104_091327\\launch_final_start.launch.py.old",
+    "new": "20261104_091327\\launch_final_start.launch.py.new",
+    "outside": false
+   },
+   "launch/move_new.launch.py": {
+    "old": "20261104_091327\\launch_move_new.launch.py.old",
+    "new": "20261104_091327\\launch_move_new.launch.py.new",
+    "outside": false
+   },
+   "launch/move_test.launch.py": {
+    "old": "20261104_091327\\launch_move_test.launch.py.old",
+    "new": "20261104_091327\\launch_move_test.launch.py.new",
+    "outside": false
+   },
+   "launch/odom_move_test.launch.py": {
+    "old": "20261104_091327\\launch_odom_move_test.launch.py.old",
+    "new": "20261104_091327\\launch_odom_move_test.launch.py.new",
+    "outside": false
+   },
+   "launch/save_path.launch.py": {
+    "old": "20261104_091327\\launch_save_path.launch.py.old",
+    "new": "20261104_091327\\launch_save_path.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261104_091327\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261104_091327\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261104_091327\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261104_091327\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_vehicle.launch.py": {
+    "old": "20261104_091327\\mapping_launch_distributed_mapping_vehicle.launch.py.old",
+    "new": "20261104_091327\\mapping_launch_distributed_mapping_vehicle.launch.py.new",
+    "outside": false
+   },
+   "mapping/scripts/save_mapping": {
+    "old": "20261104_091327\\mapping_scripts_save_mapping.old",
+    "new": "20261104_091327\\mapping_scripts_save_mapping.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261104_091327\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261104_091327\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "scripts/record_seg.py": {
+    "old": "20261104_091327\\scripts_record_seg.py.old",
+    "new": "20261104_091327\\scripts_record_seg.py.new",
+    "outside": false
+   },
+   "CLAUDE.md": {
+    "old": "20261104_091327\\CLAUDE.md.old",
+    "new": "20261104_091327\\CLAUDE.md.new",
+    "outside": false
+   },
+   "mapping/config/ekf.yaml": {
+    "old": null,
+    "new": "20261104_091327\\mapping_config_ekf.yaml.new",
+    "outside": false
+   },
+   "mapping/config/mapper_fast.yaml": {
+    "old": null,
+    "new": "20261104_091327\\mapping_config_mapper_fast.yaml.new",
+    "outside": false
+   },
+   "mapping/scripts/ekf_input": {
+    "old": null,
+    "new": "20261104_091327\\mapping_scripts_ekf_input.new",
+    "outside": false
+   },
+   "mapping/scripts/fit_track": {
+    "old": null,
+    "new": "20261104_091327\\mapping_scripts_fit_track.new",
+    "outside": false
+   },
+   "mapping/scripts/map_report": {
+    "old": "20261104_091327\\mapping_scripts_map_report.old",
+    "new": "20261104_091327\\mapping_scripts_map_report.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261104_091327\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261104_091327\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261104_091603",
+  "time": "2026-11-04 09:16",
+  "label": "赛道拟合：和规则 A/B/C/D 对齐并校正",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261104_091603\\CLAUDE.md.old",
+    "new": "20261104_091603\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261104_093822",
+  "time": "2026-11-04 09:38",
+  "label": "EKF 改用小车时间（不换算）",
+  "note": "",
+  "files": {
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261104_093822\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261104_093822\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "CLAUDE.md": {
+    "old": "20261104_093822\\CLAUDE.md.old",
+    "new": "20261104_093822\\CLAUDE.md.new",
+    "outside": false
+   },
+   "mapping/scripts/ekf_input": {
+    "old": "20261104_093822\\mapping_scripts_ekf_input.old",
+    "new": "20261104_093822\\mapping_scripts_ekf_input.new",
+    "outside": false
+   },
+   "mapping/scripts/fit_track": {
+    "old": "20261104_093822\\mapping_scripts_fit_track.old",
+    "new": "20261104_093822\\mapping_scripts_fit_track.new",
+    "outside": false
+   },
+   "mapping/scripts/map_report": {
+    "old": "20261104_093822\\mapping_scripts_map_report.old",
+    "new": "20261104_093822\\mapping_scripts_map_report.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261104_093822\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261104_093822\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261104_193309",
+  "time": "2026-11-04 19:33",
+  "label": "跑路径代码恢复原样，只改建图自己的里程计名；保存快捷键 a/b/c/d；去畸变按实测雷达频率",
+  "note": "",
+  "files": {
+   "mapping/launch/distributed_mapping_vehicle.launch.py": {
+    "old": "20261104_193309\\mapping_launch_distributed_mapping_vehicle.launch.py.old",
+    "new": "20261104_193309\\mapping_launch_distributed_mapping_vehicle.launch.py.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261104_193309\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261104_193309\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261104_193309\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261104_193309\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   },
+   "电脑 PowerShell 配置 Microsoft.PowerShell_profile.ps1": {
+    "old": "20261104_193309\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.old",
+    "new": "20261104_193309\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261104_194313",
+  "time": "2026-11-04 19:43",
+  "label": "跑路径代码恢复原样，只改建图自己的里程计名；保存快捷键 a/b/c/d；去畸变按实测雷达频率",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261104_194313\\CLAUDE.md.old",
+    "new": "20261104_194313\\CLAUDE.md.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261104_211058",
+  "time": "2026-11-04 21:10",
+  "label": "跑路径代码恢复原样，只改建图自己的里程计名；保存快捷键 a/b/c/d；去畸变按实测雷达频率",
+  "note": "",
+  "files": {
+   "CLAUDE.md": {
+    "old": "20261104_211058\\CLAUDE.md.old",
+    "new": "20261104_211058\\CLAUDE.md.new",
+    "outside": false
+   },
+   "电脑 PowerShell 配置 Microsoft.PowerShell_profile.ps1": {
+    "old": "20261104_211058\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.old",
+    "new": "20261104_211058\\电脑_PowerShell_配置_Microsoft.PowerShell_profile.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261105_173440",
+  "time": "2026-11-05 17:34",
+  "label": "地面线过滤不再删挡板；两种投票地图（只投票 / 投票 + 地面剔除）实时看、保存、报告并排",
+  "note": "",
+  "files": {
+   "CMakeLists.txt": {
+    "old": "20261105_173440\\CMakeLists.txt.old",
+    "new": "20261105_173440\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261105_173440\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261105_173440\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261105_173440\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261105_173440\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "mapping/rviz/slam_mapping.rviz": {
+    "old": "20261105_173440\\mapping_rviz_slam_mapping.rviz.old",
+    "new": "20261105_173440\\mapping_rviz_slam_mapping.rviz.new",
+    "outside": false
+   },
+   "mapping/scripts/map_report": {
+    "old": "20261105_173440\\mapping_scripts_map_report.old",
+    "new": "20261105_173440\\mapping_scripts_map_report.new",
+    "outside": false
+   },
+   "mapping/scripts/save_mapping": {
+    "old": "20261105_173440\\mapping_scripts_save_mapping.old",
+    "new": "20261105_173440\\mapping_scripts_save_mapping.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261105_173440\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261105_173440\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "CLAUDE.md": {
+    "old": "20261105_173440\\CLAUDE.md.old",
+    "new": "20261105_173440\\CLAUDE.md.new",
+    "outside": false
+   },
+   "mapping/scripts/vote_map": {
+    "old": null,
+    "new": "20261105_173440\\mapping_scripts_vote_map.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261105_173440\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261105_173440\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261105_174749",
+  "time": "2026-11-05 17:47",
+  "label": "地面线过滤不再删挡板；两种投票地图（只投票 / 投票 + 地面剔除）实时看、保存、报告并排",
+  "note": "",
+  "files": {
+   "mapping/scripts/vote_map": {
+    "old": "20261105_174749\\mapping_scripts_vote_map.old",
+    "new": "20261105_174749\\mapping_scripts_vote_map.new",
+    "outside": false
+   }
+  }
+ },
+ {
+  "id": "20261105_182031",
+  "time": "2026-11-05 18:20",
+  "label": "建图突跳：扫描先扣住等经 WiFi 晚到的里程计；锥桶实时描深",
+  "note": "",
+  "files": {
+   "CMakeLists.txt": {
+    "old": "20261105_182031\\CMakeLists.txt.old",
+    "new": "20261105_182031\\CMakeLists.txt.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261105_182031\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261105_182031\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261105_182031\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261105_182031\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "mapping/rviz/slam_mapping.rviz": {
+    "old": "20261105_182031\\mapping_rviz_slam_mapping.rviz.old",
+    "new": "20261105_182031\\mapping_rviz_slam_mapping.rviz.new",
+    "outside": false
+   },
+   "mapping/scripts/map_report": {
+    "old": "20261105_182031\\mapping_scripts_map_report.old",
+    "new": "20261105_182031\\mapping_scripts_map_report.new",
+    "outside": false
+   },
+   "mapping/scripts/scan_tf_bridge": {
+    "old": "20261105_182031\\mapping_scripts_scan_tf_bridge.old",
+    "new": "20261105_182031\\mapping_scripts_scan_tf_bridge.new",
+    "outside": false
+   },
+   "CLAUDE.md": {
+    "old": "20261105_182031\\CLAUDE.md.old",
+    "new": "20261105_182031\\CLAUDE.md.new",
+    "outside": false
+   },
+   "mapping/scripts/cone_marks": {
+    "old": null,
+    "new": "20261105_182031\\mapping_scripts_cone_marks.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261105_182031\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261105_182031\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ },
+ {
+  "id": "20261110_173940",
+  "time": "2026-11-10 17:39",
+  "label": "按用户要求移除锥桶实时描深",
+  "note": "",
+  "files": {
+   "mapping/launch/distributed_mapping_pc.launch.py": {
+    "old": "20261110_173940\\mapping_launch_distributed_mapping_pc.launch.py.old",
+    "new": "20261110_173940\\mapping_launch_distributed_mapping_pc.launch.py.new",
+    "outside": false
+   },
+   "mapping/launch/distributed_mapping_pc_windows.launch.py": {
+    "old": "20261110_173940\\mapping_launch_distributed_mapping_pc_windows.launch.py.old",
+    "new": "20261110_173940\\mapping_launch_distributed_mapping_pc_windows.launch.py.new",
+    "outside": false
+   },
+   "AGENTS.md": {
+    "old": null,
+    "new": "20261110_173940\\AGENTS.md.new",
+    "outside": false
+   },
+   "电脑 D:\\ubuntu\\slam\\run_slam_windows.ps1": {
+    "old": "20261110_173940\\电脑_D__ubuntu_slam_run_slam_windows.ps1.old",
+    "new": "20261110_173940\\电脑_D__ubuntu_slam_run_slam_windows.ps1.new",
+    "outside": true
+   }
+  }
+ }
+]

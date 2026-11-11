@@ -1,0 +1,8 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-04-21-32-00-318990-DESKTOP-7JE3QFM-23380
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\1103_map_20270127_101953_default；run_index=1；SLAM async；位姿来源 /key1_odom；去畸变 开
+[INFO] [python.exe-1]: process started with pid [26908]
+[INFO] [async_slam_toolbox_node.EXE-2]: process started with pid [21188]
+[INFO] [python.exe-3]: process started with pid [23188]
+[async_slam_toolbox_node.EXE-2] [INFO] [1793799123.209543700] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-2] [INFO] [1793799123.210000200] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.

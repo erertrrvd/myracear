@@ -1,0 +1,16 @@
+# Shortcuts: a line that is just "2" / "3" runs the mapping command below
+if (Get-Module -ListAvailable PSReadLine) {
+    Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+        $shortcuts = @{
+            '2' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered'
+            '3' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Save'
+        }
+        $line = $null; $cursor = $null
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+        $key = $line.Trim()
+        if ($shortcuts.ContainsKey($key)) {
+            [Microsoft.PowerShell.PSConsoleReadLine]::Replace(0, $line.Length, $shortcuts[$key])
+        }
+        [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+    }
+}

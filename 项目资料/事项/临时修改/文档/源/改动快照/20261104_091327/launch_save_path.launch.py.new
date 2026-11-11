@@ -1,0 +1,41 @@
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    return LaunchDescription([
+        # 11-04：车上只留一个里程计（快捷键 1 起的）；没敲 1 单独用时 start_odom:=true
+        DeclareLaunchArgument('start_odom', default_value='false'),
+            
+        Node(
+            package='my_racecar',
+            executable='get_distance',
+            name='get_distance',
+            output='screen',
+            
+        ),
+            
+        #启动里程计节点
+        Node(
+            package='encoder_imu',
+            executable='imu_encoder_mix',
+            name='imu_encoder_mix',
+            output='screen',
+            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04：车上唯一的里程计话题（快捷键 1 起的 imu_encoder_mix）
+            condition=IfCondition(LaunchConfiguration('start_odom')),
+        ),        
+            
+    
+        Node(
+            package='my_racecar',
+            executable='save_path',
+            name='save_path',
+            output='screen',
+            remappings=[('/encoder_imu_odom', '/key1_odom')],  # 11-04：车上唯一的里程计话题（快捷键 1 起的 imu_encoder_mix）
+            parameters=[{
+                'save_dx': 0.1,
+            }]
+        )
+    ])

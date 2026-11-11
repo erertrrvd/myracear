@@ -1,0 +1,33 @@
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    return LaunchDescription([
+            
+        Node(
+            package='my_racecar',
+            executable='get_distance',
+            name='get_distance',
+            output='screen',
+            
+        ),
+            
+        #启动里程计节点
+        Node(
+            package='encoder_imu',
+            executable='imu_encoder_mix',
+            name='imu_encoder_mix',
+            output='screen',
+        ),        
+            
+    
+        Node(
+            package='my_racecar',
+            executable='save_path',
+            name='save_path',
+            output='screen',
+            parameters=[{
+                'save_dx': 0.1,
+            }]
+        )
+    ])

@@ -1,0 +1,123 @@
+#!/usr/bin/python3
+"""Keep a lightweight per-run mapping and control-topic activity log."""
+import json
+import math
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import rclpy
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import OccupancyGrid, Odometry
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
+from tf2_ros import Buffer, TransformListener
+
+
+class StatusLogger(Node):
+    def __init__(self, path, run_index):
+        super().__init__('mapping_status_logger')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = path.open('a', buffering=1)
+        self.run_index = run_index
+        self.scans = self.odom = self.commands = 0
+        self.occupied = self.map_cells = 0
+        self.known_cells = 0
+        self.prev = (0, 0, 0)          # (scans, odom, known_cells) 上一个 5 秒的值
+        self.stall = 0
+        self.pose = {}                 # 最近一次的位姿记录（odom=里程计，slam=SLAM 修正后，corr=修正量）
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.write('start')
+        self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+        self.create_subscription(Odometry, '/encoder_imu_odom', self.on_odom, 10)
+        self.create_subscription(Twist, '/cmd_vel', self.on_command, 10)
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                         reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, qos)
+        self.create_timer(5.0, self.on_timer)
+
+    def write(self, event):
+        self.file.write(json.dumps({
+            'time_utc': datetime.now(timezone.utc).isoformat(),
+            'run_index': self.run_index, 'event': event,
+            'scans': self.scans, 'odometry_messages': self.odom,
+            'cmd_vel_messages': self.commands, 'map_cells': self.map_cells,
+            'occupied_cells': self.occupied, 'known_cells': self.known_cells,
+            **self.pose,
+        }, ensure_ascii=False) + '\n')
+
+    def on_scan(self, _msg):
+        self.scans += 1
+
+    def on_odom(self, _msg):
+        self.odom += 1
+
+    def on_command(self, _msg):
+        self.commands += 1
+
+    def on_map(self, msg):
+        self.map_cells = msg.info.width * msg.info.height
+        self.occupied = sum(v >= 65 for v in msg.data)
+        self.known_cells = sum(v >= 0 for v in msg.data)
+
+    def tf_pose(self, parent, child):
+        try:
+            t = self.tf_buffer.lookup_transform(parent, child, rclpy.time.Time()).transform
+        except Exception:
+            return None
+        q = t.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        return t.translation.x, t.translation.y, yaw
+
+    def update_pose(self):
+        """里程计位姿（odom_pc→base_pc）、SLAM 位姿（map→base_pc）和两者之差（map→odom_pc = SLAM 的修正量）。
+        修正量随时间持续变大 = 里程计在漂，SLAM 在不断拉回；修正量突变 = 回环生效或匹配跳变。"""
+        odom = self.tf_pose('odom_pc', 'base_pc')
+        slam = self.tf_pose('map', 'base_pc')
+        corr = self.tf_pose('map', 'odom_pc')
+        self.pose = {}
+        for name, v in (('odom', odom), ('slam', slam), ('corr', corr)):
+            if v:
+                self.pose[name] = [round(v[0], 3), round(v[1], 3), round(math.degrees(v[2]), 2)]
+
+    def on_timer(self):
+        self.update_pose()
+        self.write('status')
+        p_scans, p_odom, p_known = self.prev
+        receiving = self.scans > p_scans
+        if receiving and self.odom == 0 and self.scans > 100:
+            self.get_logger().warn('已收到扫描但 /encoder_imu_odom 一条都没有：检查小车里程计，或改用无里程计模式')
+        # 扫描在来、地图却 30 秒没长：车没动，或 SLAM 没跟上（里程计缺失/车速过快/TF 问题）
+        if receiving and self.known_cells == p_known and self.scans > 100:
+            self.stall += 1
+        else:
+            self.stall = 0
+        if self.stall in (6, 18) or (self.stall > 18 and self.stall % 12 == 0):
+            self.write('stalled')
+            self.get_logger().warn(
+                f'地图已 {self.stall * 5} 秒没有增长（扫描 {self.scans} 帧，里程计 {self.odom} 条）：'
+                '车没动，或 SLAM 没跟上；检查里程计、推车速度、电脑端 scan_tf_bridge 日志')
+        self.prev = (self.scans, self.odom, self.known_cells)
+
+
+def main():
+    path = Path(sys.argv[1])
+    run_index = int(sys.argv[2])
+    rclpy.init()
+    node = StatusLogger(path, run_index)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.write('stop')
+        node.file.close()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

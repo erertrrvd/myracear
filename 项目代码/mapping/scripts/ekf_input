@@ -1,0 +1,160 @@
+#!/usr/bin/python3
+"""电脑端 EKF 融合的输入适配（-Odom ekf 时由 distributed_mapping_pc_windows.launch.py 启动）。
+
+融合什么：轮速（/encoder 的 twist.linear.x，m/s）+ IMU 角速度（/IMU_data 的 angular_velocity.z）
+→ robot_localization ekf_node → 车体位姿 /ekf_odom。雷达不进 EKF：SLAM 自己拿雷达匹配修正位姿（三者合起来
+就是“IMU + 轮速 + 雷达”）。
+
+时间：全部用小车上的时间（小车每次开机时钟都不一样，不换算）。本节点把收到的车上时间戳当成时钟发
+/ekf_clock，ekf_node 用 use_sim_time + /clock:=/ekf_clock 跟着它走，所以 ekf_node 的预测、融合、输出
+都是车上时间，/ekf_odom 可以直接给 scan_tf_bridge 按扫描时间戳插值。
+（/ekf_clock 不叫 /clock：免得别的节点误用；车上和电脑其他节点都不开 use_sim_time，不受影响。）
+
+本节点还做：
+  1. 协方差：车上 /encoder、/IMU_data 的协方差全是 0，ekf_node 会把 0 当成“绝对准”。这里按参数填上。
+  2. 帧名：统一成 odom_ekf / base_ekf，与车端、电脑端其他帧都不冲突。
+  3. 角速度单位/方向自检：每 5 s 用 /key1_odom 的航向变化对比积分出的 IMU 航向，
+     比例接近 57 = IMU 发的是度/秒（imu_gyro_scale:=0.01745），接近 -1 = 方向反了（imu_gyro_scale:=-1）。
+
+话题：订 /encoder、/IMU_data、/ekf_odom（只计数）、/key1_odom（只自检）；发 /ekf/wheel、/ekf/imu、/ekf_clock。
+"""
+import math
+
+import rclpy
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import Imu
+
+
+def sec(stamp):
+    return stamp.sec + stamp.nanosec * 1e-9
+
+
+def yaw_of(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+class EkfInput(Node):
+    def __init__(self):
+        super().__init__('ekf_input')
+        p = lambda n, d: self.declare_parameter(n, d).value
+        self.frame, self.child = p('odom_frame', 'odom_ekf'), p('base_frame', 'base_ekf')
+        self.gyro_scale = float(p('imu_gyro_scale', 1.0))
+        self.v_std0 = float(p('wheel_v_std', 0.05))          # 轮速标准差 = v_std0 + v_std_k*|v|（打滑随速度变大）
+        self.v_std_k = float(p('wheel_v_std_k', 0.05))
+        self.vy_std = float(p('wheel_vy_std', 0.02))          # 车不会横着走：侧向速度 0 当作一次测量
+        self.w_std = float(p('imu_w_std', 0.02))              # 角速度标准差 rad/s
+        self.clock_t = None                                   # 发出去的最新车上时间（只往前走）
+        self.n_wheel = self.n_imu = self.n_out = 0
+        self.gyro_int = 0.0                                   # 5 s 内 IMU 角速度积分（已乘 scale）
+        self.last_imu = None
+        self.key1_yaw = None                                  # [上一条航向, 5 s 内累计变化]
+
+        self.wheel_pub = self.create_publisher(Odometry, '/ekf/wheel', 50)
+        self.imu_pub = self.create_publisher(Imu, '/ekf/imu', 100)
+        self.clock_pub = self.create_publisher(Clock, '/ekf_clock', 10)
+        self.create_subscription(Odometry, '/encoder', self.on_wheel, 50)
+        self.create_subscription(Imu, '/IMU_data', self.on_imu, qos_profile_sensor_data)
+        self.create_subscription(Odometry, '/ekf_odom', self.on_out, 50)
+        self.create_subscription(Odometry, '/key1_odom', self.on_key1, 50)
+        self.create_timer(5.0, self.report)
+        self.get_logger().info('EKF 输入适配启动：/encoder + /IMU_data -> /ekf/wheel + /ekf/imu -> ekf_node -> /ekf_odom；'
+                               f'时间用小车时间（/ekf_clock）；imu_gyro_scale={self.gyro_scale}')
+
+    def tick(self, stamp):
+        """车上时间戳推进 /ekf_clock（只往前走，乱序的旧消息不让时钟倒退）。"""
+        t = sec(stamp)
+        if self.clock_t is None or t > self.clock_t:
+            self.clock_t = t
+            self.clock_pub.publish(Clock(clock=stamp))
+
+    def on_wheel(self, msg):
+        v = msg.twist.twist.linear.x
+        if not math.isfinite(v):
+            return
+        self.tick(msg.header.stamp)
+        out = Odometry()
+        out.header.stamp = msg.header.stamp
+        out.header.frame_id, out.child_frame_id = self.frame, self.child
+        out.twist.twist.linear.x = v
+        cov = [0.0] * 36
+        cov[0] = (self.v_std0 + self.v_std_k * abs(v)) ** 2
+        cov[7] = self.vy_std ** 2
+        for i in (14, 21, 28, 35):
+            cov[i] = 1e3                                   # 没测的量给大方差（配置里也没用）
+        out.twist.covariance = cov
+        self.wheel_pub.publish(out)
+        self.n_wheel += 1
+
+    def on_imu(self, msg):
+        w = msg.angular_velocity.z * self.gyro_scale
+        if not math.isfinite(w):
+            return
+        self.tick(msg.header.stamp)
+        t = sec(msg.header.stamp)
+        if self.last_imu is not None and 0.0 < t - self.last_imu < 0.5:
+            self.gyro_int += w * (t - self.last_imu)
+        self.last_imu = t
+        out = Imu()
+        out.header.stamp = msg.header.stamp
+        out.header.frame_id = self.child
+        out.angular_velocity.z = w
+        out.angular_velocity_covariance = [1e3, 0.0, 0.0, 0.0, 1e3, 0.0, 0.0, 0.0, self.w_std ** 2]
+        out.orientation_covariance[0] = -1.0               # 不用 IMU 的姿态
+        out.linear_acceleration_covariance[0] = -1.0       # 不用加速度（车上振动大）
+        out.orientation.w = 1.0
+        self.imu_pub.publish(out)
+        self.n_imu += 1
+
+    def on_out(self, msg):
+        self.n_out += 1
+
+    def on_key1(self, msg):
+        y = yaw_of(msg.pose.pose.orientation)
+        if self.key1_yaw is None:
+            self.key1_yaw = [y, 0.0]
+        self.key1_yaw[1] += math.atan2(math.sin(y - self.key1_yaw[0]), math.cos(y - self.key1_yaw[0]))
+        self.key1_yaw[0] = y
+
+    def report(self):
+        log = self.get_logger()
+        log.info(f'5s 内：轮速 {self.n_wheel} 条、IMU {self.n_imu} 条、EKF 输出 {self.n_out} 条')
+        if self.n_wheel == 0 or self.n_imu == 0:
+            log.error('!! 没收到 ' + '、'.join(n for n, c in (('/encoder', self.n_wheel), ('/IMU_data', self.n_imu)) if c == 0)
+                      + '：EKF 没有输入。小车上 ros2 topic hz /encoder、/IMU_data 看有没有在发')
+        elif self.n_out == 0:
+            log.error('!! ekf_node 5s 内没有输出 /ekf_odom：看 ekf_node 窗口的报错')
+        if self.key1_yaw is not None and abs(self.key1_yaw[1]) > math.radians(20):
+            k = self.gyro_int / self.key1_yaw[1]
+            msg = f'航向自检：IMU 积分 {math.degrees(self.gyro_int):.0f}°，/key1_odom {math.degrees(self.key1_yaw[1]):.0f}°，比例 {k:.2f}'
+            if 0.8 < k < 1.25:
+                log.info(msg + '（正常）')
+            elif 40 < abs(k) < 75:
+                log.error(msg + ' → IMU 发的是 度/秒，加 -GyroScale ' + f'{self.gyro_scale / k:.5f}')
+            elif -1.25 < k < -0.8:
+                log.error(msg + ' → 方向反了，加 -GyroScale ' + f'{-self.gyro_scale}')
+            else:
+                log.warn(msg + ' → 对不上，先别用 EKF 模式建图')
+        if self.key1_yaw is not None:
+            self.key1_yaw[1] = 0.0
+        self.gyro_int = 0.0
+        self.n_wheel = self.n_imu = self.n_out = 0
+
+
+def main():
+    rclpy.init()
+    node = EkfInput()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

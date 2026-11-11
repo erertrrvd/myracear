@@ -1,0 +1,9 @@
+[INFO] [launch]: All log files can be found below C:\Users\lzc2\.ros\log\2026-11-10-18-46-39-555163-DESKTOP-7JE3QFM-14624
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: Windows 电脑端建图：map_dir=D:\ubuntu\slam\maps_replay\diagnose_20261110_subset\loop_on_slow；run_index=1；SLAM async；位姿来源 /key1_odom；去畸变 开
+[INFO] [python.exe-1]: process started with pid [29540]
+[INFO] [async_slam_toolbox_node.EXE-2]: process started with pid [30084]
+[INFO] [python.exe-3]: process started with pid [17556]
+[async_slam_toolbox_node.EXE-2] [INFO] [1794307600.646962700] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+[async_slam_toolbox_node.EXE-2] [INFO] [1794307600.647410600] [slam_toolbox]: CeresSolver: Using SCHUR_JACOBI preconditioner.
+[async_slam_toolbox_node.EXE-2] Registering sensor: [Custom Described Lidar]

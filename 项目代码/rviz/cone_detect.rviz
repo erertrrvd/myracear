@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<!--
+  cone_detect.rviz —— 锥桶检测专用 RViz 预设
+
+  Fixed Frame 已设为 laser_link（和 cone_detect 默认的 frame_id 一致）
+  只显示 MarkerArray（锥桶标记），背景纯黑，方便看清
+
+  ⚠️ 如果你的雷达 frame_id 不是 laser_link，用 launch 的 frame_id 参数改
+-->
+<rviz config_version="1">
+  <Rviz>
+    <Global Options>
+      <Fixed Frame>laser_link</Fixed Frame>
+      <Background Color>18; 20; 24</Background Color>
+      <Frame Rate>30</Frame Rate>
+      <Default Light>true</Default Light>
+    </Global Options>
+
+    <Displays>
+      <!-- 地面网格（判断尺度和方位）-->
+      <Grid>
+        <Class>rviz_default_plugins/Grid</Class>
+        <Name>Grid</Name>
+        <Enabled>true</Enabled>
+        <Cell Size>1</Cell Size>
+        <Plane Cell Count>20</Plane Cell Count>
+        <Color>80; 85; 95</Color>
+        <Alpha>0.35</Alpha>
+        <Line Style>Lines</Line Style>
+        <Plane>XY</Plane>
+        <Offset>
+          <X>0</X><Y>0</Y><Z>0</Z>
+        </Offset>
+      </Grid>
+
+      <!-- 锥桶标记（绿球 / 灰球 / 黄线 / 文字）-->
+      <MarkerArray>
+        <Class>rviz_default_plugins/MarkerArray</Class>
+        <Name>锥桶标记</Name>
+        <Enabled>true</Enabled>
+        <Topic>
+          <Value>/cone_detect/markers</Value>
+          <Depth>10</Depth>
+          <Durability Policy>Transient Local</Durability Policy>
+          <History Policy>Keep Last</History Policy>
+          <Reliability Policy>Reliable</Reliability Policy>
+        </Topic>
+      </MarkerArray>
+    </Displays>
+
+    <Tools>
+      <Tool>-1; 87; 100</Tool>
+    </Tools>
+
+    <Views>
+      <Current View Class="rviz_default_plugins/Orbit" Name="Current View">
+        <Target Frame>laser_link</Target Frame>
+        <Distance>7</Distance>
+        <Focal Point>
+          <X>0</X><Y>0</Y><Z>0</Z>
+        </Focal Point>
+        <Yaw>0</Yaw>
+        <Pitch>1.5708</Pitch>
+      </Current View>
+    </Views>
+
+    <Window Geometry>
+      <X>60</X><Y>60</Y>
+      <Width>1280</Width><Height>800</Height>
+    </Window Geometry>
+
+    <Panels>
+      <Panel>
+        <Class>rviz_common/Displays</Class>
+        <Name>Displays</Name>
+      </Panel>
+      <Panel>
+        <Class>rviz_common/Views</Class>
+        <Name>Views</Name>
+      </Panel>
+    </Panels>
+  </Rviz>
+</rviz>

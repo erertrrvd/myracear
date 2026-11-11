@@ -1,0 +1,116 @@
+"""Windows 电脑端分布式建图入口（不需要编译安装 my_racecar 包）。
+
+与 distributed_mapping_pc.launch.py 的区别：那个用 Node(package='my_racecar') 找节点，
+Windows 的 pixi 环境里没有编译这个包；本文件直接用 pixi 环境的 python 运行
+mapping/scripts 里的 scan_tf_bridge、mapping_status_logger，SLAM Toolbox 和 rviz2 用环境自带的。
+SLAM 逻辑、参数（mapper.yaml）与 Linux 版完全相同。
+
+运行（在 D:\\ubuntu\\slam 里，推荐用 run_slam_windows.ps1 一键）：
+  pixi run --frozen ros2 launch <本文件> map_dir:=D:/ubuntu/slam/maps
+
+保存地图（保持本 launch 运行，另开终端）：
+  pixi run --frozen python <mapping/scripts/save_mapping> --run-index 1 --map-dir D:/ubuntu/slam/maps
+"""
+import sys
+from pathlib import Path
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
+from launch.conditions import LaunchConfigurationEquals
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+MAPPING = Path(__file__).resolve().parents[1]      # .../mapping
+SCRIPTS = MAPPING / 'scripts'
+
+
+def _setup(context):
+    value = lambda n: LaunchConfiguration(n).perform(context)
+    root = Path(value('map_dir')).expanduser().resolve()
+    run_index = int(value('run_index'))
+    if run_index not in (1, 2, 3):
+        raise RuntimeError('run_index 只能是 1、2 或 3')
+    root.mkdir(parents=True, exist_ok=True)
+    use_odom = value('use_odom').lower()
+    if use_odom not in ('true', 'false'):
+        raise RuntimeError('use_odom 只能是 true 或 false')
+    boolean = lambda n: value(n).lower() == 'true'
+    autosave = float(value('autosave_period'))     # 秒；0 = 关闭自动保存
+    source = value('source')
+    if source not in ('auto', 'relay', 'direct'):
+        raise RuntimeError('source 只能是 auto、relay 或 direct')
+    slam_mode = value('slam_mode')
+    if slam_mode not in ('sync', 'async'):
+        raise RuntimeError('slam_mode 只能是 sync 或 async')
+
+    slam_overrides = {'scan_topic': '/scan_pc', 'odom_frame': 'odom_pc',
+                      'base_frame': 'base_pc', 'map_frame': 'map'}
+    if use_odom == 'false':
+        slam_overrides.update({'minimum_travel_distance': 0.0,
+                               'minimum_travel_heading': 0.0})
+
+    def py(script, *args):
+        return ExecuteProcess(cmd=[sys.executable, str(SCRIPTS / script), *args],
+                              output='screen')
+
+    bridge_params = [
+        '--ros-args',
+        '-p', f'use_odom:={use_odom}',
+        '-p', f'deskew:={str(boolean("deskew")).lower()}',
+        '-p', f'scan_period:={float(value("scan_period"))}',
+        '-p', f'stamp_at_end:={str(boolean("stamp_at_end")).lower()}',
+        '-p', f'odom_offset:={float(value("odom_offset"))}',
+        '-p', f'beams:={int(value("beams"))}',
+        '-p', f'laser_x:={float(value("laser_x"))}',
+        '-p', f'laser_y:={float(value("laser_y"))}',
+        '-p', f'laser_yaw:={float(value("laser_yaw"))}',
+        '-p', f'source:={source}',
+        '-p', f'ground_filter:={value("ground_filter")}',
+        '-p', f'ground_rho:={float(value("ground_rho"))}',
+        '-p', f'ground_theta_deg:={float(value("ground_theta_deg"))}',
+    ]
+    return [
+        py('scan_tf_bridge', *bridge_params),
+        LogInfo(msg=f'Windows 电脑端建图：map_dir={root}；run_index={run_index}；'
+                    f'扫描来源 {source}；SLAM {slam_mode}'),
+        # sync：每帧按顺序处理，网络恢复后补发来的一批扫描不会被跳过；async 忙时会跳帧。
+        Node(package='slam_toolbox', executable=f'{slam_mode}_slam_toolbox_node',
+             name='slam_toolbox', output='screen',
+             parameters=[value('mapper_config'), slam_overrides]),
+        py('mapping_status_logger', str(root / f'.run{run_index}-live.jsonl'), str(run_index),
+           '/scan_pc', '/odom_pc'),
+        *([py('map_autosave', str(root), str(autosave))] if autosave > 0 else []),
+        # 实体化障碍层：/map_solid（只用来看，不影响 SLAM）
+        *([py('obstacle_layer', str(root), str(run_index))] if boolean('solid') else []),
+        Node(package='rviz2', executable='rviz2', output='screen',
+             arguments=['-d', value('rviz_config')],
+             condition=LaunchConfigurationEquals('rviz', 'true')),
+    ]
+
+
+def generate_launch_description():
+    defaults = {
+        'map_dir': 'D:/ubuntu/slam/maps',
+        'run_index': '1',
+        'rviz': 'true',
+        'beams': '720',            # scan_tf_bridge 重采样点数；雷达每帧约 979 点，小于它会丢点
+        'autosave_period': '60',   # 每隔多少秒自动存一份到 <map_dir>/autosave/（0=关）
+        'use_odom': 'true',
+        'solid': 'false',          # 实时描黑 obstacle_layer -> /map_solid；默认关，存图后 save_mapping 自动后处理描黑
+        'source': 'auto',          # 扫描来源：auto（车上有 scan_relay 就用它）/ relay / direct（放 bag 时用）
+        'slam_mode': 'sync',       # sync 逐帧处理（抗丢包补发）；async 为原来的方式
+        'deskew': 'false',
+        'scan_period': '0.1',
+        'stamp_at_end': 'false',
+        'odom_offset': '0.0',
+        'laser_x': '0.0', 'laser_y': '0.0', 'laser_yaw': '0.0',
+        'ground_filter': 'auto',   # 地面线过滤：auto 车动起来后自己认出并删掉 / fixed 用下面两个值 / off
+        'ground_rho': '0.0',       # 雷达到地面线的垂直距离（m）；0 = 不给定
+        'ground_theta_deg': '0.0', # 地面线法向（雷达系，0 = 正前方）
+        'mapper_config': str(MAPPING / 'config' / 'mapper.yaml'),
+        'rviz_config': str(MAPPING / 'rviz' / 'slam_mapping.rviz'),
+    }
+    return LaunchDescription([
+        *(DeclareLaunchArgument(n, default_value=d) for n, d in defaults.items()),
+        OpaqueFunction(function=_setup),
+    ])

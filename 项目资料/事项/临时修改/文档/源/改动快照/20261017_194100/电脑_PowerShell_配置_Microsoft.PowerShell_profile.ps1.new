@@ -1,0 +1,11 @@
+# Shortcut: a line that is just "2" starts Windows SLAM mapping (filtered mode)
+if (Get-Module -ListAvailable PSReadLine) {
+    Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+        $line = $null; $cursor = $null
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+        if ($line.Trim() -eq '2') {
+            [Microsoft.PowerShell.PSConsoleReadLine]::Replace(0, $line.Length, 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered')
+        }
+        [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+    }
+}

@@ -1,0 +1,113 @@
+#!/usr/bin/python3
+"""建图时把扫到的锥桶在 rviz 里实时描深：/map 里认出的锥桶画成黑色实心圆盘（MarkerArray /cone_marks）。只用来看。
+
+为什么：slam_toolbox 的 /map 里锥桶只有一两个零散的格子，rviz 里看着淡、容易看漏（11-05 用户要求加深）。
+和以前的实时描黑（obstacle_layer -> /map_solid，-LiveSolid）不同：那个是整张图重画一遍替换 /map，
+跟着 SLAM 变时整张图都在闪、看着乱（11-03 用户要求关掉）；这里不改 /map，只在锥桶上面叠一个黑圆盘，
+墙和其他障碍照旧看 /map。
+
+做法：每 period 秒拿最新的 /map，用 obstacle_layer.solidify() 找锥桶（和存图后描黑 solidify_map 同一套判据：
+小而孤立的障碍团，离墙 / 房间外未知区域超过 1 m），在每个锥桶中心画一个圆盘。位置每次都从 /map 重新算，
+SLAM 回环把锥桶挪了，圆盘跟着挪，不会留下旧位置。
+不写 .run<N>-solid.json（save_mapping 靠那个文件判断有没有实时描黑），所以存图后照常自动描黑。
+
+参数：period（秒，默认 1.0）、radius（画的圆盘半径，默认 0.10 m，比锥桶 8 cm 略大更显眼）、
+     cone_r（判据用的锥桶半径，默认 0.08 m）
+"""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+
+import numpy as np
+import rclpy
+from nav_msgs.msg import OccupancyGrid
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from visualization_msgs.msg import Marker, MarkerArray
+
+HERE = Path(__file__).resolve().parent
+
+
+def load_obstacle_layer():
+    """obstacle_layer 没有 .py 后缀，按文件路径加载，只用它的 solidify()。"""
+    loader = importlib.machinery.SourceFileLoader('obstacle_layer_mod', str(HERE / 'obstacle_layer'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class ConeMarks(Node):
+    def __init__(self):
+        super().__init__('cone_marks')
+        p = lambda n, d: self.declare_parameter(n, d).value
+        self.period = float(p('period', 1.0))
+        self.radius = float(p('radius', 0.10))
+        self.cone_r = float(p('cone_r', 0.08))
+        self.solidify = load_obstacle_layer().solidify
+        self.slam_map = None
+        self.stamp_done = None
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(OccupancyGrid, '/map', self.on_map, latched)
+        self.pub = self.create_publisher(MarkerArray, '/cone_marks', 1)
+        self.create_timer(self.period, self.publish)
+        self.n_last = -1
+        self.get_logger().info('锥桶实时描深启动：/map -> /cone_marks（rviz 里 Cone Marks 那层，黑色实心圆盘）')
+
+    def on_map(self, msg):
+        self.slam_map = msg
+
+    def publish(self):
+        base = self.slam_map
+        if base is None or base is self.stamp_done:
+            return
+        self.stamp_done = base
+        info = base.info
+        grid = np.array(base.data, dtype=np.int8).reshape(info.height, info.width)
+        _, cones, _ = self.solidify(grid, info.resolution, self.cone_r)
+        frame = base.header.frame_id or 'map'
+        now = self.get_clock().now().to_msg()
+        arr = MarkerArray()
+        clear = Marker()
+        clear.header.frame_id = frame
+        clear.action = Marker.DELETEALL
+        arr.markers.append(clear)
+        ox, oy, res = info.origin.position.x, info.origin.position.y, info.resolution
+        for k, (ci, cj, _) in enumerate(cones):
+            m = Marker()
+            m.header.frame_id = frame
+            m.header.stamp = now
+            m.ns = 'cones'
+            m.id = k
+            m.type = Marker.CYLINDER
+            m.action = Marker.ADD
+            m.pose.position.x = ox + (ci + 0.5) * res
+            m.pose.position.y = oy + (cj + 0.5) * res
+            m.pose.position.z = 0.02
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = 2 * self.radius
+            m.scale.z = 0.02
+            m.color.r = m.color.g = m.color.b = 0.0
+            m.color.a = 1.0
+            arr.markers.append(m)
+        self.pub.publish(arr)
+        if self.n_last < 0 or abs(len(cones) - self.n_last) >= 5:      # 变化 5 个以上才打印，免得刷屏
+            self.get_logger().info(f'锥桶实时描深：当前认出 {len(cones)} 个锥桶')
+            self.n_last = len(cones)
+
+
+def main():
+    rclpy.init()
+    node = ConeMarks()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()

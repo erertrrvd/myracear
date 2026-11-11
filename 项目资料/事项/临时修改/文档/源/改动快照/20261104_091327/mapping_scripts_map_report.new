@@ -1,0 +1,346 @@
+#!/usr/bin/python3
+"""建图报告：一趟地图生成一页 report.html（双击用浏览器打开，不连网），一眼看清这趟建得怎么样。
+
+内容：
+  1. 结论：SLAM 有没有突跳（修正量 corr 5 s 内变化）、地面线认没认出、描出几个锥桶，里程计是不是只有一个，各写正常 / 不正常；
+  2. 后处理图 report_map.png：灰底原图 + 红色实心锥桶（描黑结果）+ 蓝线车走过的轨迹（SLAM 位姿，绿点起点、黑点终点）；
+  3. 原图 map.png；
+  4. 曲线：corr 的位置 / 朝向随时间变化；
+  5. 明细表。
+数据：<趟目录>/map.*（没有 map_solid 就先调 solidify_map 描黑）+ 状态日志（run1 里的 run.jsonl，或地图目录的 .run1-live.jsonl）。
+
+用法（一般不用手动跑：按 3 保存、离线重建保存后会自动生成；关建图窗口时也会给 autosave 生成一份）：
+  map_report <地图目录或趟目录>        例：D:/ubuntu/slam/maps/run_20261103_2057_filtered
+  给地图目录时：有 run1 用 run1，没有就用 autosave。
+"""
+import base64
+import html
+import importlib.machinery
+import importlib.util
+import json
+import math
+import struct
+import sys
+import zlib
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+# 5 s 内 corr 变化超过它算“突跳”。回环、慢慢纠正里程计时 5 s 内也会变 0.5 m 左右（11-03 20:57 那趟两圈
+# 最大 0.71 m / 3°，图是好的）；20:02、21:02 那两趟坏图是 2~7 m / 25~67°。
+JUMP_M, JUMP_DEG = 1.0, 10.0
+
+
+def load(name):
+    loader = importlib.machinery.SourceFileLoader(name.replace('-', '_') + '_mod', str(HERE / name))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def png_rgb(path, img):
+    h, w, _ = img.shape
+    def chunk(tag, data):
+        return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
+    rows = b''.join(b'\x00' + img[r].tobytes() for r in range(h))
+    path.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                     + chunk(b'IDAT', zlib.compress(rows, 9)) + chunk(b'IEND', b''))
+
+
+def find_dirs(arg):
+    """返回 (趟目录, 状态日志, 趟名)"""
+    p = Path(arg).resolve()
+    if (p / 'map.yaml').is_file():
+        run, root = p, p.parent
+    elif (p / 'run1' / 'map.yaml').is_file():
+        run, root = p / 'run1', p
+    elif (p / 'autosave' / 'map.yaml').is_file():
+        run, root = p / 'autosave', p
+    else:
+        raise RuntimeError(f'{p} 里没有地图（run1\\ 或 autosave\\ 下的 map.yaml）')
+    idx = run.name[3:] if run.name.startswith('run') and run.name[3:].isdigit() else '1'
+    log = run / 'run.jsonl' if (run / 'run.jsonl').is_file() else root / f'.run{idx}-live.jsonl'
+    return run, (log if log.is_file() else None), f'{root.name}\\{run.name}'
+
+
+def read_log(log):
+    rows = []
+    if log is None:
+        return rows
+    for line in log.read_text(encoding='utf-8', errors='replace').splitlines():   # 老日志里偶有 GBK 字
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            pass
+    return rows
+
+
+def analyse(rows):
+    st = [r for r in rows if r.get('event') in ('status', 'stalled', 'stop') and 'odom' in r]
+    a = dict(n=len(st), jumps=[], ground=None, ground_at=None,
+             t=[], corr=[], slam=[], start=None, end=None,
+             moving_s=0.0, dist=0.0, max_corr_step=(0.0, 0.0), odom_rate=[], odom_pubs=0, dup_odom_at=None, moving_rate=[])
+    prev_c = prev_o = t0 = prev_n = None
+    for r in st:
+        t = datetime.fromisoformat(r['time_utc'].replace('Z', '+00:00'))
+        t0 = t0 or t
+        sec = (t - t0).total_seconds()
+        L = r.get('link') or {}
+        a['odom_pubs'] = max(a['odom_pubs'], L.get('odom_pubs', 0))
+        # 里程计条数 / 秒：一个里程计车停、车动都约 50（11-04 核对 11-01、11-03 全部记录：只有一个发布者的
+        # 21:33~22:07 四趟车动时 40~49；21:23 两个发布者时约 90，11-01 车动时 73~93 且位置跳几十米）。
+        # 车动时 > 70 = 两个里程计；0 = 那 5 s 一条都没收到（网络断了）。
+        # 有 link.odom_rate（桥直接数 /key1_odom，EKF 模式也对）就用它，否则用日志里的累计条数。
+        rate = None
+        if prev_n is not None and sec > prev_n[0]:
+            rate = (r.get('odometry_messages', 0) - prev_n[1]) / (sec - prev_n[0])
+            a['odom_rate'].append((sec, rate))
+        if L.get('odom_rate') is not None:
+            rate = L['odom_rate']
+        if rate is not None and prev_n is not None:
+            if a['dup_odom_at'] is None and rate < 1 and r.get('scans', 0) > 0:
+                a['dup_odom_at'] = (sec, r['time_utc'][11:19])        # 第一次断流的时刻
+        prev_n = (sec, r.get('odometry_messages', 0))
+        if L.get('ground') and a['ground'] is None:
+            a['ground'], a['ground_at'] = L['ground'], sec
+        if L.get('ground'):
+            a['ground'] = L['ground']
+        c, o, s = r.get('corr'), r['odom'], r.get('slam')
+        if c is None or s is None:
+            continue
+        if prev_o is not None:
+            d = math.hypot(o[0] - prev_o[0], o[1] - prev_o[1])
+            a['dist'] += d
+            if d > 0.05:
+                a['moving_s'] += 5.0
+                if rate is not None:
+                    a['moving_rate'].append((sec, rate, r['time_utc'][11:19]))
+        if prev_c is not None:
+            dm = math.hypot(c[0] - prev_c[0], c[1] - prev_c[1])
+            dd = abs((c[2] - prev_c[2] + 180) % 360 - 180)
+            a['max_corr_step'] = (max(a['max_corr_step'][0], dm), max(a['max_corr_step'][1], dd))
+            if dm > JUMP_M or dd > JUMP_DEG:
+                a['jumps'].append((sec, r['time_utc'][11:19], dm, dd))
+        prev_c, prev_o = c, o
+        a['t'].append(sec)
+        a['corr'].append(c)
+        a['slam'].append(s)
+        a['start'] = a['start'] or r['time_utc']
+        a['end'] = r['time_utc']
+    return a
+
+
+def draw_map(run, slam, cones):
+    """描黑后的图（灰底，障碍黑）+ 红色实心锥桶 + 蓝色轨迹，返回 RGB 数组（第 0 行 = y 最大，和 png 一致）。"""
+    sm = load('solidify_map')
+    src = run / 'map_solid.pgm' if (run / 'map_solid.pgm').is_file() else run / 'map.pgm'
+    w, h, body = sm.read_pgm(src)
+    base = np.frombuffer(body, np.uint8)[:w * h].reshape(h, w)
+    res, origin = sm.read_yaml(run / 'map.yaml')
+    img = np.stack([base] * 3, -1).astype(np.uint8)
+    k = max(1, int(math.ceil(900 / max(w, h))))                  # 小图放大，便于看
+    img = np.repeat(np.repeat(img, k, 0), k, 1)
+
+    def px(x, y):
+        return (int((x - origin[0]) / res * k + k / 2), int((h - 1 - (y - origin[1]) / res) * k + k / 2))
+
+    def dot(cx, cy, r, col):
+        y0, y1 = max(cy - r, 0), min(cy + r + 1, img.shape[0])
+        x0, x1 = max(cx - r, 0), min(cx + r + 1, img.shape[1])
+        if y0 < y1 and x0 < x1:
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            img[y0:y1, x0:x1][(yy - cy) ** 2 + (xx - cx) ** 2 <= r * r] = col
+
+    for c in cones or []:                                        # 描黑认出的锥桶：红色实心圆
+        dot(*px(c[0], c[1]), max(2, int(round(0.10 / res * k))), (220, 30, 30))
+    pts = [px(s[0], s[1]) for s in slam]
+    lw = max(1, k // 2)
+    for (xa, ya), (xb, yb) in zip(pts[:-1], pts[1:]):
+        n = max(abs(xb - xa), abs(yb - ya), 1)
+        for i in range(n + 1):
+            dot(round(xa + (xb - xa) * i / n), round(ya + (yb - ya) * i / n), lw, (30, 90, 230))
+    if pts:
+        dot(*pts[0], 4 * lw + 2, (0, 170, 0))
+        dot(*pts[-1], 4 * lw + 2, (0, 0, 0))
+    return img, w, h, res
+
+
+def svg_chart(a):
+    """corr 位置（米）和朝向（度）随时间变化；红虚线 = 突跳。"""
+    if len(a['t']) < 2:
+        return '<p>状态日志太短，画不出曲线。</p>'
+    W, H, pl, pr, pt, pb = 900, 260, 50, 50, 15, 40
+    T = max(a['t']) or 1
+    m = [math.hypot(c[0], c[1]) for c in a['corr']]
+    d = [c[2] for c in a['corr']]
+    mm = max(max(m), 0.5)
+    dm = max(max(abs(v) for v in d), 5)
+    X = lambda t: pl + (W - pl - pr) * t / T
+    Y1 = lambda v: pt + (H - pt - pb) * (1 - v / mm)
+    Y2 = lambda v: pt + (H - pt - pb) * (0.5 - v / (2 * dm))
+    out = [f'<svg viewBox="0 0 {W} {H}" class="chart">',
+           f'<line x1="{pl}" y1="{H - pb}" x2="{W - pr}" y2="{H - pb}" class="ax"/>']
+    for sec, _, dmv, ddv in a['jumps']:
+        out.append(f'<line x1="{X(sec):.1f}" y1="{pt}" x2="{X(sec):.1f}" y2="{H - pb}" stroke="#d32" stroke-dasharray="3 3"/>')
+    out.append('<polyline fill="none" stroke="#1e5ae6" stroke-width="2" points="'
+               + ' '.join(f'{X(t):.1f},{Y1(v):.1f}' for t, v in zip(a['t'], m)) + '"/>')
+    out.append('<polyline fill="none" stroke="#2a9d3a" stroke-width="2" points="'
+               + ' '.join(f'{X(t):.1f},{Y2(v):.1f}' for t, v in zip(a['t'], d)) + '"/>')
+    out.append(f'<text x="{pl - 6}" y="{pt + 10}" text-anchor="end" fill="#1e5ae6">{mm:.1f} m</text>')
+    out.append(f'<text x="{pl - 6}" y="{H - pb}" text-anchor="end" fill="#1e5ae6">0</text>')
+    out.append(f'<text x="{W - pr + 6}" y="{pt + 10}" fill="#2a9d3a">+{dm:.0f}°</text>')
+    out.append(f'<text x="{W - pr + 6}" y="{H - pb}" fill="#2a9d3a">-{dm:.0f}°</text>')
+    out.append(f'<text x="{W - pr}" y="{H - 2}" text-anchor="end">{T:.0f} s</text>')
+    out.append('</svg>')
+    return ''.join(out)
+
+
+def report(arg, log=print):
+    """arg：地图目录或趟目录；返回 report.html 的路径。"""
+    run, logf, name = find_dirs(arg)
+    if not (run / 'map_solid.pgm').is_file() or (
+            run.name == 'autosave' and (run / 'map.pgm').stat().st_mtime > (run / 'map_solid.pgm').stat().st_mtime):
+        load('solidify_map').run(run, force=True, log=lambda m: None)
+    fit_json = run / 'track_fit.json'
+    if (run / 'solid.json').is_file() and (not fit_json.is_file()
+                                          or fit_json.stat().st_mtime < (run / 'solid.json').stat().st_mtime):
+        try:
+            load('fit_track').run(run, log=lambda m: None)
+        except Exception as exc:
+            log(f'赛道拟合失败（报告照常生成）：{exc}')
+    fit = json.loads(fit_json.read_text(encoding='utf-8')) if fit_json.is_file() else None
+    rows = read_log(logf)
+    a = analyse(rows)
+    cones, centers = None, []
+    if (run / 'solid.json').is_file():
+        sj = json.loads((run / 'solid.json').read_text(encoding='utf-8'))
+        cones, centers = sj.get('cones'), sj.get('cone_centers', [])
+    img, w, h, res = draw_map(run, a['slam'], centers)
+    png_rgb(run / 'report_map.png', img)
+    saved = run.name != 'autosave'
+
+    checks = []   # (项目, 结果, 是否正常, 说明)
+    checks.append(('地图', '已按 3 保存（run 目录）' if saved else '只有 autosave（没按 3 保存）', saved,
+                   '正式用要按 3 保存' if not saved else ''))
+    if a['n']:
+        j = a['jumps']
+        checks.append(('SLAM 突跳（corr 5 s 内变化）',
+                       f"最大 {a['max_corr_step'][0]:.2f} m / {a['max_corr_step'][1]:.0f}°；超过 {JUMP_M} m 或 {JUMP_DEG:.0f}° 的 {len(j)} 次"
+                       + ('：' + '、'.join(f'{tm}（{dmv:.1f} m / {ddv:.0f}°）' for _, tm, dmv, ddv in j[:6]) if j else ''),
+                       not j, '突跳的时刻地图容易错位、重影；对着曲线里的红虚线看' if j else ''))
+        rates = [x[1] for x in a['odom_rate']]
+        # 只算断了之后又恢复的段：结尾一直为 0 是关了快捷键 1 / 停了建图，不算断流
+        last_ok = max((i for i, x in enumerate(rates) if x >= 1), default=-1)
+        gaps = sum(1 for x in rates[:last_ok] if x < 1)
+        if not gaps:
+            a['dup_odom_at'] = None
+        mv = a['moving_rate']
+        hi = [x for x in mv if x[1] > 70]
+        dup = a['odom_pubs'] > 1 or bool(hi)
+        parts = []
+        if a['odom_pubs']:
+            parts.append(f"车上里程计（/key1_odom 或 11-04 前的 /encoder_imu_odom）发布者最多 {a['odom_pubs']} 个")
+        if mv:
+            parts.append(f"车动时里程计 {min(x[1] for x in mv):.0f}~{max(x[1] for x in mv):.0f} 条/s（一个约 50）"
+                         + (f"，超过 70 条/s 的 {len(hi)} 段，第一次在 {hi[0][2]}" if hi else ''))
+        checks.append(('里程计是不是只有一个', '；'.join(parts) or '车没动，判断不了', None if not parts else not dup,
+                       '两个里程计交替发同一个话题，位姿来回跳，SLAM 被来回拉（11-03 21:23 那趟就是这样）。'
+                       '只留快捷键 1 起的那个；小车上 ros2 topic info /key1_odom -v 看是谁在发' if dup else ''))
+        scans_s = [x[1] for x in a['odom_rate']]
+        checks.append(('数据有没有断', f'里程计 / 扫描整整 5 s 一条没收到的有 {gaps} 段'
+                       + (f"，第一次在 {a['dup_odom_at'][1]}（第 {a['dup_odom_at'][0]:.0f} s）" if a['dup_odom_at'] else ''),
+                       gaps == 0,
+                       'WiFi 断了：断的那段车还在走，SLAM 没数据，恢复后容易对不上（室内好图从来没断过）' if gaps else ''))
+        c = a['corr'][-1] if a['corr'] else [0, 0, 0]
+        checks.append(('结束时 SLAM 对里程计的修正 corr', f'{math.hypot(c[0], c[1]):.2f} m / {c[2]:.1f}°', None,
+                       '只作参考：慢慢变大是里程计漂，SLAM 在纠正；一下子变很大才有问题（看上一行）'))
+        g = a['ground']
+        checks.append(('地面线', '没认出' if g is None else f'第 {a["ground_at"]:.0f} s 认出：法向 {g[0]}°、距雷达 {g[1]} m',
+                       None if g is None else True,
+                       '雷达水平时没有是正常的；操场上有跟车走的直线却没认出，下次可 -Ground fixed 直接给定' if g is None else
+                       f'下次可开局就用：-Ground fixed -GroundRho {g[1]} -GroundDeg {g[0]}'))
+        checks.append(('跑了多久', f"状态日志 {a['n']} 条（约 {a['n'] * 5 / 60:.1f} 分钟），车在动约 {a['moving_s'] / 60:.1f} 分钟，里程计累计约 {a['dist']:.0f} m", None, ''))
+    else:
+        checks.append(('状态日志', '没找到', False, '看不了漂移和里程计'))
+    checks.append(('描黑', f'锥桶 {cones} 个（红色实心圆）' if cones is not None else '没有', cones is not None, ''))
+    if fit:
+        sc = '、'.join(f'{k} {v:.2f}' for k, v in sorted(fit['scores'].items()))
+        if fit.get('corrected'):
+            checks.append(('赛道拟合（规则 A/B/C/D）',
+                           f"最像赛道 {fit['track']}（分数 {sc}，越小越像）；{fit['matched']}/{fit['cones']} 个锥桶参与校正，"
+                           f"离赛道边线中位 {fit['dist_rigid_median']:.2f} m → {fit['dist_after_median']:.2f} m",
+                           not fit.get('ambiguous'),
+                           f"和 {fit['second']} 分不清（A/B、C/D 只差左头内圈直角 / 圆弧）：认错了就用 fit_track --track 重做，见手册 3.4.4"
+                           if fit.get('ambiguous') else '校正后的地图 map_track.png / .pgm / .yaml（下面有图）'))
+        else:
+            checks.append(('赛道拟合（规则 A/B/C/D）', f"和 4 种赛道都不像（分数 {sc}；认对时约 0.16~0.29），没有校正", None,
+                           '练习场地锥桶摆法和规则图不同时是正常的；确定是某种赛道时用 fit_track --track X --force 强制校正'))
+
+    def badge(ok):
+        return {True: '<b class="ok">正常</b>', False: '<b class="bad">不正常</b>', None: '<b class="na">参考</b>'}[ok]
+    b64 = lambda p: base64.b64encode(p.read_bytes()).decode()
+    rows_html = ''.join(f'<tr><td>{html.escape(k)}</td><td>{badge(ok)}</td><td>{html.escape(v)}'
+                        + (f'<div class="tip">{html.escape(tip)}</div>' if tip else '') + '</td></tr>'
+                        for k, v, ok, tip in checks)
+    detail = ''.join(f'<tr><td>{t:.0f}</td><td>{s[0]:.2f}, {s[1]:.2f}, {s[2]:.0f}°</td><td>{c[0]:.2f}, {c[1]:.2f}, {c[2]:.1f}°</td></tr>'
+                     for t, s, c in zip(a['t'], a['slam'], a['corr']))
+    raw_png = run / 'map.png'
+    page = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>建图报告 {html.escape(name)}</title><style>
+:root{{--bg:#fafafa;--fg:#222;--card:#fff;--line:#ddd;--mut:#666}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#1b1b1b;--fg:#e6e6e6;--card:#262626;--line:#444;--mut:#aaa}}}}
+body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 "Microsoft YaHei",system-ui,sans-serif}}
+main{{max-width:1000px;margin:0 auto;padding:16px}}h1{{font-size:20px;margin:4px 0}}h2{{font-size:17px;margin:22px 0 8px}}
+.mut{{color:var(--mut)}}table{{border-collapse:collapse;width:100%;background:var(--card)}}td,th{{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}}
+.ok{{color:#2a9d3a}}.bad{{color:#d32}}.na{{color:var(--mut)}}.tip{{color:var(--mut);font-size:13px}}
+img{{max-width:100%;image-rendering:pixelated;border:1px solid var(--line);background:#cdcdcd}}
+.chart{{width:100%;background:var(--card);border:1px solid var(--line);font-size:12px}}.chart text{{fill:var(--mut)}}.ax{{stroke:var(--line)}}
+details{{margin-top:8px}}.leg span{{display:inline-block;margin-right:14px}}.sw{{display:inline-block;width:12px;height:12px;vertical-align:-1px;margin-right:4px}}
+</style></head><body><main>
+<h1>建图报告：{html.escape(name)}</h1>
+<div class="mut">{html.escape(str(run))}　|　{a['start'] or ''} ~ {a['end'] or ''}（UTC）　|　生成于 {datetime.now():%Y-%m-%d %H:%M}</div>
+<h2>结论</h2><table>{rows_html}</table>
+<h2>后处理图（描黑 + 轨迹）</h2>
+<div class="leg mut"><span><i class="sw" style="background:#dc1e1e"></i>描黑认出的锥桶</span><span><i class="sw" style="background:#000"></i>其他障碍（靠边的按原图）</span>
+<span><i class="sw" style="background:#1e5ae6"></i>车的轨迹（SLAM，每 5 s 一点）</span>
+<span><i class="sw" style="background:#00aa00"></i>起点</span><span><i class="sw" style="background:#000"></i>终点</span></div>
+<img src="data:image/png;base64,{b64(run / 'report_map.png')}" alt="后处理图">
+<div class="mut">地图 {w}×{h} 格，每格 {res * 100:.0f} cm（{w * res:.1f} m × {h * res:.1f} m）。同一批锥桶出现两份、轨迹一段突然平移 / 转向，就是 SLAM 突跳。</div>
+{'<h2>赛道拟合：和规则赛道 ' + html.escape(fit['track']) + (' 对齐并校正' if fit.get('corrected') else ' 对齐（不像，没有校正）') + '</h2>'
+ '<div class="leg mut"><span><i class="sw" style="background:#285ae6"></i>赛道外圈（蓝锥桶）</span><span><i class="sw" style="background:#dc2828"></i>内圈（红锥桶）</span>'
+ '<span><i class="sw" style="background:#e6be00"></i>135° 折线区（地面黄线）</span><span><i class="sw" style="background:#00aa00"></i>地图里的锥桶（校正后）</span></div>'
+ '<img src="data:image/png;base64,' + b64(run / 'track_fit.png') + '" alt="赛道拟合">'
+ '<div class="mut">绿点贴着蓝线、红线 = 形状和规则赛道一致。底图是校正后的地图（坐标原点在赛道外框左下角外 1 m，16.8 m × 5.5 m）。</div>'
+ if fit and (run / 'track_fit.png').is_file() else ''}
+<h2>SLAM 修正量 corr 随时间</h2>
+<div class="leg mut"><span><i class="sw" style="background:#1e5ae6"></i>位置修正（米，左轴）</span><span><i class="sw" style="background:#2a9d3a"></i>朝向修正（度，右轴）</span>
+<span><i class="sw" style="background:#d32"></i>红虚线 = 突跳</span></div>
+{svg_chart(a)}
+<div class="mut">正常：两条线都平缓（慢慢变大是里程计在漂、SLAM 在纠正）。不正常：几秒内跳一大截（红虚线）。</div>
+{'<h2>原图 map.png</h2><img src="data:image/png;base64,' + b64(raw_png) + '" alt="原图">' if raw_png.is_file() else ''}
+<details><summary>明细（每 5 s 一行）</summary><table><tr><th>秒</th><th>SLAM 位姿 x, y, 朝向</th><th>corr</th></tr>{detail}</table></details>
+</main></body></html>"""
+    (run / 'report.html').write_text(page, encoding='utf-8')
+    bad = [k for k, _, ok, _ in checks if ok is False]
+    log(f'建图报告：{run / "report.html"}（双击用浏览器打开）'
+        + (f'；不正常：{"、".join(bad)}' if bad else '；各项正常'))
+    return run / 'report.html'
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return 2
+    report(sys.argv[1])
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f'建图报告生成失败：{exc}', file=sys.stderr, flush=True)
+        sys.exit(1)
