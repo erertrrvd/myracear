@@ -6,8 +6,10 @@ if (Get-Module -ListAvailable PSReadLine) {
     Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
         $shortcuts = @{
             '2' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered -Fast -OdomOnly'
+            '21' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered -Fast -OdomOnly -PauseAfterLap'
             '3' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Save'
-            '4' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered -Fast'
+            '4' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered -Fast -OdomOnly -AnchorGraph -NoField'
+            '5' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Mode filtered -Fast -OdomOnly -AnchorGraph'
             'a' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Save -Track A'
             'b' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Save -Track B'
             'c' = 'Set-Location D:\ubuntu\slam; .\run_slam_windows.bat -Save -Track C'

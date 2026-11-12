@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+"""Opt-in point-landmark factor-graph SLAM prototype for myracear.
+
+Consumes /scan_pc and scan-time odom_pc->base_pc / odom_pc->laser_pc TF.
+Builds start cone anchors only while stationary; uses wheel/IMU motion factors,
+strict anchor constellation matching and conservative dynamic landmark tracks.
+Publishes its own paths & diagnostics, NEVER map->odom, /cmd_vel or /car_cmd_vel.
+Do not connect the output to the real vehicle controller without validation.
+"""
+import csv
+import json
+import math
+import sys
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from array import array
+from pathlib import Path
+
+import rclpy
+from geometry_msgs.msg import PoseStamped, TransformStamped
+from nav_msgs.msg import Path as RosPath, OccupancyGrid
+from rclpy.duration import Duration
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from rclpy.time import Time
+from sensor_msgs.msg import LaserScan, PointCloud2, PointField
+from std_msgs.msg import String
+from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
+from visualization_msgs.msg import Marker, MarkerArray
+
+from cone_factor_geom import (Pose, ReferenceBuilder, compose, inverse,
+                                  scan_cones, transform_point, euclidean,
+                                  match_constellation, greedy_pairs, noncollinear,
+                                  wrap, ConsecutiveCorrectionGate)
+from cone_factor_graph_core import ConeFactorGraph, between
+from cone_factor_map import OccupancyReprojector, ScanFrame
+
+
+def pose_of(tf):
+    t,q=tf.translation,tf.rotation
+    return Pose(t.x,t.y,math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)))
+
+
+def pose_msg(p,stamp,frame):
+    out=PoseStamped()
+    out.header.frame_id=frame
+    out.header.stamp=stamp
+    out.pose.position.x=p.x;out.pose.position.y=p.y
+    out.pose.orientation.z=math.sin(p.yaw/2)
+    out.pose.orientation.w=math.cos(p.yaw/2)
+    return out
+
+
+class ConeFactorGraphNode(Node):
+    def __init__(self):
+        super().__init__('cone_factor_graph_node')
+        cfg=lambda name,default:self.declare_parameter(name,default).value
+        self.scan_topic=str(cfg('scan_topic','/scan_pc'))
+        self.odom_frame=str(cfg('odom_frame','odom_pc'))
+        self.base_frame=str(cfg('base_frame','base_pc'))
+        self.frame=str(cfg('anchor_frame','anchor_map'))
+        self.ref_frames=int(cfg('ref_frames',20))
+        self.min_refs=int(cfg('min_refs',4))
+        self.min_seen=int(cfg('min_seen',9))
+        self.max_refs=int(cfg('max_refs',8))
+        self.max_range=float(cfg('max_range',8.0))
+        self.min_points=int(cfg('min_points',3))
+        self.max_width=float(cfg('max_width',.35))
+        self.cluster_gap=float(cfg('cluster_gap',.22))
+        self.keyframe_distance=float(cfg('keyframe_distance',.65))
+        self.keyframe_angle=float(cfg('keyframe_angle',.12))
+        self.max_keyframes=int(cfg('max_keyframes',500))
+        self.max_landmarks=int(cfg('max_landmarks',120))
+        self.anchor_prior_gate_m=float(cfg('anchor_prior_gate_m',.8))
+        self.anchor_prior_gate_rad=float(cfg('anchor_prior_gate_rad',.35))
+        self.map_gate=float(cfg('map_gate_m',.32))
+        self.enable_learned_landmarks=bool(cfg('enable_learned_landmarks',False))
+        self.field_enabled=bool(cfg('field_enabled',False))
+        field_front=float(cfg('field_front_m',-1.0))
+        field_back=float(cfg('field_back_m',-1.0))
+        field_left=float(cfg('field_left_m',-1.0))
+        field_right=float(cfg('field_right_m',-1.0))
+        self.field_sigma=float(cfg('field_boundary_sigma_m',.25))
+        self.field_bounds=None
+        if self.field_enabled:
+            distances=(field_front,field_back,field_left,field_right)
+            if not all(math.isfinite(v) and v >= 0 for v in distances):
+                raise ValueError('场地边界启用时必须填写起点到前、后、左、右墙的距离')
+            if abs(field_front+field_back-30.0) > .05 or abs(field_left+field_right-20.0) > .05:
+                raise ValueError('场地边界距离要求前后之和 30 米、左右之和 20 米')
+            if not math.isfinite(self.field_sigma) or self.field_sigma <= 0:
+                raise ValueError('场地边界软约束标准差必须大于零')
+            self.field_bounds=(-field_back,field_front,-field_right,field_left)
+        self.max_opt_iterations=int(cfg('max_opt_iterations',8))
+        self.allow_global_relocalization=bool(cfg('allow_global_relocalization',False))
+        self.global_consensus_m=float(cfg('global_consensus_m',.35))
+        self.global_consensus_rad=float(cfg('global_consensus_rad',.16))
+        self.publish_occupancy=bool(cfg('publish_occupancy',True))
+        self.live_ratio=bool(cfg('live_ratio_map',False))
+        self.map_period=max(.25,float(cfg('map_publish_period',1.0 if self.live_ratio else 2.0)))
+        self.live_scans=[]
+        self.map_observation_distance=float(cfg('map_observation_distance',0.0))
+        self.map_observation_angle=float(cfg('map_observation_angle',0.0))
+        self.map_observation_interval=float(cfg('map_observation_interval',0.0))
+        self.last_map_observation=None
+        self.scan_overlay_pub=None
+        if cfg('scan_overlay',False):
+            self.scan_overlay_pub=self.create_publisher(PointCloud2,'/cone_factor_graph/current_scan',1)
+        self.optimized_votes={}
+        self.odom_votes={}
+        self.scan_stride=max(1,int(cfg('map_scan_stride',1)))
+        self.grid_mapper=OccupancyReprojector(
+            resolution=float(cfg('grid_resolution',.10)),
+            half_size=float(cfg('grid_half_size',35.0)),
+            min_hits=int(cfg('live_grid_min_hits',1)) if self.live_ratio else int(cfg('grid_min_hits',2)),
+            min_hit_ratio=float(cfg('grid_min_hit_ratio',.22)),
+            unconfirmed_unknown=bool(cfg('grid_unconfirmed_unknown',False)))
+        self.log_path=str(cfg('log_path','')).strip()
+        self.logfile=None
+        self.path_csv=Path(self.log_path).with_suffix('.paths.csv') if self.log_path else None
+        if self.log_path:
+            path=Path(self.log_path).expanduser();path.parent.mkdir(parents=True,exist_ok=True)
+            self.logfile=path.open('a',encoding='utf-8')
+        self.tf=Buffer(cache_time=Duration(seconds=20.0))
+        self.tf_listener=TransformListener(self.tf,self)
+        # 独立显示坐标系：只注册 anchor_map，不改变已有 map→odom_pc 链。
+        self.display_tf=StaticTransformBroadcaster(self)
+        display_frame=TransformStamped()
+        display_frame.header.stamp=self.get_clock().now().to_msg()
+        display_frame.header.frame_id=self.frame
+        display_frame.child_frame_id='anchor_display'
+        display_frame.transform.rotation.w=1.0
+        self.display_tf.sendTransform(display_frame)
+        self.status_pub=self.create_publisher(String,'/cone_factor_graph/status',10)
+        self.pose_pub=self.create_publisher(PoseStamped,'/cone_factor_graph/base_pose',10)
+        self.path_pub=self.create_publisher(RosPath,'/cone_factor_graph/path',1)
+        self.odom_path_pub=self.create_publisher(RosPath,'/cone_factor_graph/odom_path',1)
+        self.slam_path_pub=self.create_publisher(RosPath,'/cone_factor_graph/slam_path',1)
+        self.mark_pub=self.create_publisher(MarkerArray,'/cone_factor_graph/landmarks',1)
+        self.field_pub=self.create_publisher(Marker,'/cone_factor_graph/field_boundary',1)
+        self.cloud_pub=self.create_publisher(PointCloud2,'/cone_factor_graph/reprojected_points',1)
+        self.odom_cloud_pub=self.create_publisher(PointCloud2,'/cone_factor_graph/odom_points',1)
+        grid_qos=QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                            durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.map_executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='cone_grid')
+        self.map_future=None
+        self.grid_pub=self.create_publisher(OccupancyGrid,'/cone_factor_graph/map',grid_qos)
+        self.grid_odom_pub=self.create_publisher(OccupancyGrid,'/cone_factor_graph/odom_map',grid_qos)
+        self.scan_queue=deque(maxlen=100)
+        self.scan_queue_dropped=0
+        self.create_subscription(LaserScan,self.scan_topic,self.enqueue_scan,qos_profile_sensor_data)
+        self.create_timer(.02,self.drain_scans)
+        self.create_timer(2.0,self.on_optimize)
+        self.create_timer(5.0,self.on_report)
+        if self.field_enabled:
+            self.create_timer(1.0,self.publish_field)
+        if self.publish_occupancy:
+            self.create_timer(self.map_period,self.on_render_map)
+            self.create_timer(.25,self.poll_render_map)
+        self.start_odom=None
+        self.builder=ReferenceBuilder()
+        self.graph=None
+        self.anchor_ids=[]
+        self.reference=[]
+        self.last_key_odom=None
+        self.last_stamp=None
+        self.key_stamps=[]
+        self.odom_path=[]
+        self.keyframe_hits=[]
+        self.keyframe_origins=[]
+        self.slam_path=[]
+        self.slam_start=None
+        self.prev_slam_correction=None
+        self.pending=[]  # candidate tracks: dict(pos=[x,y], observations=[(key,local)])
+        self.last_anchor_key=-1
+        self.global_gate=ConsecutiveCorrectionGate(
+            self.global_consensus_m,self.global_consensus_rad)
+        self.map_renders=0
+        self.global_acceptances=0
+        self.last_optimized_key=0
+        self.anchor_observations=0
+        self.dynamic_observations=0
+        self.tf_failures=0
+        self.last_result=None
+        self.reference_started=False
+        self.locked=False
+        self.get_logger().warn('POINT LANDMARK FACTOR GRAPH: EXPERIMENTAL, READ-ONLY; DO NOT USE FOR MOTION CONTROL')
+
+    def send(self,info):
+        info['keyframes']=0 if self.graph is None else len(self.graph.poses)
+        info['anchored']=self.locked
+        msg=json.dumps(info,ensure_ascii=False)
+        self.status_pub.publish(String(data=msg))
+        if self.logfile:
+            self.logfile.write(msg+'\n');self.logfile.flush()
+
+    def query(self,parent,child,stamp):
+        return pose_of(self.tf.lookup_transform(parent,child,stamp,timeout=Duration(seconds=0.0)).transform)
+
+    def enqueue_scan(self,msg):
+        if len(self.scan_queue)==self.scan_queue.maxlen:
+            self.scan_queue_dropped+=1
+        self.scan_queue.append((time.monotonic(),msg))
+
+    def drain_scans(self):
+        # 让 TF 回调先执行，等扫描时刻的位姿可用后再按顺序消费。
+        for _ in range(4):
+            if not self.scan_queue:return
+            arrived,msg=self.scan_queue[0]
+            stamp=Time.from_msg(msg.header.stamp)
+            ready=(self.tf.can_transform(self.odom_frame,self.base_frame,stamp,timeout=Duration(seconds=0.0)) and
+                   self.tf.can_transform(self.odom_frame,msg.header.frame_id,stamp,timeout=Duration(seconds=0.0)))
+            if not ready:
+                if time.monotonic()-arrived<1.5:return
+                self.scan_queue.popleft();self.tf_failures+=1
+                if self.tf_failures<=3 or self.tf_failures%100==0:
+                    self.get_logger().warn(f'等待扫描时刻 TF 超时，累计丢弃 {self.tf_failures} 帧')
+                continue
+            self.scan_queue.popleft()
+            self.on_scan(msg)
+
+    def get_points(self,msg):
+        return scan_cones(msg.ranges,msg.angle_min,msg.angle_increment,
+                          max(.1,msg.range_min),min(self.max_range,msg.range_max),
+                          cluster_gap=self.cluster_gap,min_points=self.min_points,
+                          max_width=self.max_width,max_cones=24)
+
+    def on_scan(self,msg):
+        at=Time.from_msg(msg.header.stamp)
+        try:
+            odom_base=self.query(self.odom_frame,self.base_frame,at)
+            odom_laser=self.query(self.odom_frame,msg.header.frame_id,at)
+        except Exception as e:
+            self.tf_failures+=1
+            if self.tf_failures<=3 or self.tf_failures%100==0:
+                self.get_logger().warn('Scan-time TF unavailable: '+str(e)[:140])
+            return
+        try:
+            slam_base=self.query('map',self.base_frame,at)
+            slam_corr=self.query('map',self.odom_frame,at)
+        except Exception:
+            slam_base=slam_corr=None
+        points=self.get_points(msg)
+        laser_in_base=between(odom_base,odom_laser)
+        if not self.locked:
+            self.last_start_scan=msg
+            self.last_start_laser_base=laser_in_base
+            self.collect_start(odom_base,odom_laser,points,msg.header.stamp,slam_base)
+            return
+        if self.last_key_odom is None:return
+        delta=between(self.last_key_odom,odom_base)
+        if math.hypot(delta.x,delta.y)<self.keyframe_distance and abs(delta.yaw)<self.keyframe_angle:
+            if self.live_ratio:
+                self.record_live_scan(delta,laser_in_base,msg)
+            return
+        if len(self.graph.poses)>=self.max_keyframes:
+            if self.live_ratio:
+                self.record_live_scan(delta,laser_in_base,msg)
+            self.send({'event':'keyframe_limit','reason':'Maximum graph size; stop this experiment and save logs'})
+            return
+        self.last_key_odom=odom_base
+        predicted_base=compose(self.graph.poses[-1],delta)
+        predicted_laser=compose(predicted_base,laser_in_base)
+        # Stage 1: strict local correspondence using current optimized pose
+        # as odometric prior. If a long period without anchors has caused drift,
+        # stage 2 can re-acquire the ENTIRE four-cone constellation. Such a
+        # large correction is accepted only after two consistent independent
+        # keyframes; otherwise a repeated cone pattern could pull the graph
+        # toward the wrong place.
+        match,n,rms,match_state=match_constellation(
+            points,self.reference,predicted_laser,min_matches=4,
+            pair_gate=.22,inlier_gate=.26,max_rms=.14,
+            max_prior_m=self.anchor_prior_gate_m,max_prior_rad=self.anchor_prior_gate_rad,
+            ambiguity_margin=.025,min_area=.12)
+        trusted=match is not None
+        if not trusted and self.allow_global_relocalization and len(points)>=4 and len(self.reference)>=4:
+            global_match,g_count,g_rms,g_state=match_constellation(
+                points,self.reference,Pose(),min_matches=4,
+                pair_gate=.15,inlier_gate=.17,max_rms=.085,
+                max_prior_m=100.0,max_prior_rad=math.pi+0.001,
+                ambiguity_margin=.04,min_area=.16)
+            if global_match is not None and g_count>=4:
+                match=global_match; n=g_count; rms=g_rms
+                match_state='global_candidate';trusted=True
+            elif g_state=='ambiguous':
+                match_state='global_ambiguous_rejected'
+                self.global_gate.reset()
+            else:
+                self.global_gate.reset()
+        elif not trusted:
+            self.global_gate.reset()
+        if trusted:
+            # 两个连续关键帧的里程计修正一致才接纳固定锚点约束。
+            candidate_base=compose(match,inverse(laser_in_base))
+            correction=compose(candidate_base,inverse(odom_base))
+            if self.global_gate.consider(correction,len(self.graph.poses)):
+                if match_state=='global_candidate':
+                    match_state='global_confirmed'
+                    self.global_acceptances+=1
+                else:
+                    match_state='local_confirmed'
+            else:
+                match_state='candidate_waiting_next_keyframe'
+                trusted=False
+        fixed_pairs=greedy_pairs(match,points,self.reference,.26) if trusted else []
+        if len(fixed_pairs)<4:
+            trusted=False;fixed_pairs=[]
+        seed=compose(match,inverse(laser_in_base)) if trusted else predicted_base
+        pose_id=self.graph.add_pose(delta,seed=seed)
+        self.key_stamps.append(msg.header.stamp)
+        self.odom_path.append(compose(inverse(self.start_odom),odom_base))
+        # Cache sparse, *local* laser hit endpoints for re-projection after graph optimization.
+        self.keyframe_hits.append(self.get_scan_hits(msg,laser_in_base))
+        self.keyframe_origins.append((laser_in_base.x,laser_in_base.y))
+        if self.live_ratio:
+            self.record_live_scan(Pose(),laser_in_base,msg,self.keyframe_hits[-1])
+        self.slam_path.append(compose(inverse(self.slam_start),slam_base) if self.slam_start is not None and slam_base is not None else None)
+        slam_jump=None
+        if slam_corr is not None and self.prev_slam_correction is not None:
+            dx=math.hypot(slam_corr.x-self.prev_slam_correction.x,slam_corr.y-self.prev_slam_correction.y)
+            da=abs(wrap(slam_corr.yaw-self.prev_slam_correction.yaw))
+            if dx>.65 or da>math.radians(8):
+                slam_jump={'translation_m':round(dx,3),'yaw_deg':round(math.degrees(da),2)}
+        if slam_corr is not None:self.prev_slam_correction=slam_corr
+        base_pts=[transform_point(laser_in_base,p) for p in points]
+        used=set()
+        used_lm=set()
+        for scan_idx,ref_idx in fixed_pairs:
+            self.graph.add_observation(pose_id,self.anchor_ids[ref_idx],base_pts[scan_idx])
+            used.add(scan_idx);used_lm.add(self.anchor_ids[ref_idx]);self.anchor_observations+=1
+        if trusted:self.last_anchor_key=pose_id
+        if not trusted:
+            # Never identify a lone, repetitive cone as an initial fixed anchor.
+            # Reliable start re-localization requires >=3 non-collinear points.
+            pass
+        # Non-anchor landmarks are associated with a strict 1:1 distance/ambiguity gate.
+        for i,q in enumerate(base_pts if self.enable_learned_landmarks else []):
+            if i in used: continue
+            estimated=transform_point(seed,q)
+            candidates=sorted((euclidean(estimated,(lm.x,lm.y)),j)
+                              for j,lm in enumerate(self.graph.landmarks)
+                              if not lm.fixed and j not in used_lm)
+            if candidates and candidates[0][0]<self.map_gate and (len(candidates)==1 or candidates[1][0]-candidates[0][0]>.18):
+                j=candidates[0][1]
+                self.graph.add_observation(pose_id,j,q)
+                used_lm.add(j);self.dynamic_observations+=1
+            else:
+                # Only seed new landmarks from repeated nearby *keyframes*.
+                self.track_candidate(pose_id,estimated,q)
+        self.pending=[p for p in self.pending if pose_id-p['last']<=5]
+        self.send({'event':'keyframe','key_id':pose_id,'cones':len(points),
+                   'matched_start_cones':len(fixed_pairs),'anchor_match':match_state,
+                   'anchor_rms':rms,'slam_tf_jump_since_keyframe':slam_jump,'landmarks':len(self.graph.landmarks),
+                   'raw_odom':[round(v,3) for v in (self.odom_path[-1].x,self.odom_path[-1].y,self.odom_path[-1].yaw)]})
+        # Optimization happens only on a timer; this callback does not block to solve.
+
+    def track_candidate(self,pose_id,world,local):
+        if len(self.graph.landmarks)>=self.max_landmarks:return
+        candidates=sorted((euclidean(world,p['pos']),i)
+                          for i,p in enumerate(self.pending)
+                          if pose_id>p['last'] and pose_id-p['last']<=3)
+        if not candidates or candidates[0][0]>.24:
+            self.pending.append({'pos':world,'observations':[(pose_id,local)],'last':pose_id})
+            return
+        j=candidates[0][1];p=self.pending[j];n=len(p['observations'])
+        p['pos']=((p['pos'][0]*n+world[0])/(n+1),(p['pos'][1]*n+world[1])/(n+1))
+        p['observations'].append((pose_id,local));p['last']=pose_id
+        if len(p['observations'])>=3:
+            # Check not a newly split cluster near an already-known landmark.
+            if min((euclidean(p['pos'],(lm.x,lm.y)) for lm in self.graph.landmarks),default=999)>.55:
+                landmark_id=self.graph.add_landmark(p['pos'],fixed=False)
+                for idx,measured in p['observations']:
+                    self.graph.add_observation(idx,landmark_id,measured)
+                self.dynamic_observations+=len(p['observations'])
+            self.pending.pop(j)
+
+    def collect_start(self,odom_base,odom_laser,points,stamp,slam_base):
+        if self.start_odom is None:self.start_odom=odom_base
+        rel=between(self.start_odom,odom_base)
+        if math.hypot(rel.x,rel.y)>.07 or abs(rel.yaw)>.08:
+            self.start_odom=odom_base;self.builder.reset()
+            return
+        transform=between(self.start_odom,odom_laser)
+        self.builder.add([transform_point(transform,p) for p in points])
+        if self.builder.frames<self.ref_frames:return
+        candidates=self.builder.finish(self.min_seen,self.max_refs)
+        refs=[]
+        for q in candidates:
+            if all(euclidean(q,z)>.5 for z in refs):refs.append(q)
+        if len(refs)<self.min_refs or not noncollinear(refs,min_area=.18):
+            self.send({'event':'reference_invalid','candidates':len(refs),
+                       'reason':'Need >=4 distinguishable non-collinear fixed cones; keep parked'})
+            self.builder.reset()
+            return
+        self.reference=refs
+        self.graph=ConeFactorGraph(bounds=self.field_bounds, boundary_sigma_m=self.field_sigma)
+        self.anchor_ids=[self.graph.add_landmark(z,fixed=True) for z in refs]
+        self.last_key_odom=odom_base
+        self.key_stamps=[stamp]
+        self.odom_path=[Pose()]
+        self.keyframe_hits=[self.get_scan_hits(self.last_start_scan, self.last_start_laser_base)
+                            if hasattr(self,'last_start_scan') else []]
+        self.keyframe_origins=[(self.last_start_laser_base.x,self.last_start_laser_base.y)
+                               if hasattr(self,'last_start_laser_base') else (0.0,0.0)]
+        self.slam_start=slam_base
+        self.slam_path=[Pose() if slam_base is not None else None]
+        self.locked=True
+        if self.live_ratio:
+            self.record_live_scan(Pose(),self.last_start_laser_base,self.last_start_scan,self.keyframe_hits[0])
+        self.publish_paths()
+        if self.publish_occupancy:
+            self.on_render_map()
+        self.get_logger().info(f'LOCKED {len(refs)} fixed anchors in anchor_map; initial pose is fixed')
+        self.send({'event':'anchor_locked','anchors':refs})
+
+    def on_optimize(self):
+        if not self.locked or len(self.graph.poses)<2:return
+        pose_id=len(self.graph.poses)-1
+        if pose_id==self.last_optimized_key:return
+        # At least 3 new keyframes between optimizations; fewer after start return.
+        if pose_id-self.last_optimized_key<3 and self.last_anchor_key!=pose_id:return
+        # If there are no useful landmark factors, optimizer cannot improve drift.
+        if len(self.graph.observations)>=3 or self.field_bounds is not None:
+            self.last_result=self.graph.optimize(iterations=self.max_opt_iterations)
+        else:
+            self.last_result={'ok':False,'reason':'insufficient landmarks; pure odometry forecast'}
+        self.last_optimized_key=pose_id
+        self.pending.clear() # pending candidates were tracked in the previous provisional map
+        self.publish_paths()
+        field_outside=0
+        field_max_exceed=0.0
+        if self.field_bounds is not None:
+            xmin,xmax,ymin,ymax=self.field_bounds
+            exceed=[max(0.0,xmin-p.x,p.x-xmax,ymin-p.y,p.y-ymax) for p in self.graph.poses]
+            field_outside=sum(v>0.0 for v in exceed)
+            field_max_exceed=max(exceed, default=0.0)
+        self.send({'event':'optimized','result':self.last_result,
+                   'anchor_residual_rms_m':self.graph.anchor_error(),
+                   'last_anchor_key':self.last_anchor_key,
+                   'global_anchor_acceptances':self.global_acceptances,
+                   'field_bounds':self.field_bounds,'field_outside_keyframes':field_outside,
+                   'field_max_exceed_m':round(field_max_exceed,3)})
+
+    def publish_field(self):
+        from geometry_msgs.msg import Point
+        xmin,xmax,ymin,ymax=self.field_bounds
+        marker=Marker()
+        marker.header.frame_id=self.frame
+        marker.header.stamp=self.get_clock().now().to_msg()
+        marker.ns='field_boundary'
+        marker.id=0
+        marker.type=Marker.LINE_STRIP
+        marker.action=Marker.ADD
+        marker.pose.orientation.w=1.0
+        marker.scale.x=.08
+        marker.color.r=1.0;marker.color.g=.65;marker.color.b=.05;marker.color.a=1.0
+        for x,y in ((xmin,ymin),(xmax,ymin),(xmax,ymax),(xmin,ymax),(xmin,ymin)):
+            point=Point();point.x=x;point.y=y;point.z=.03
+            marker.points.append(point)
+        self.field_pub.publish(marker)
+
+    def publish_paths(self):
+        if not self.graph:return
+        actual=RosPath(); actual.header.frame_id=self.frame
+        actual.header.stamp=self.key_stamps[-1]
+        raw=RosPath();raw.header=actual.header
+        slam=RosPath();slam.header=actual.header
+        for i,p in enumerate(self.graph.poses):
+            actual.poses.append(pose_msg(p,self.key_stamps[i],self.frame))
+            raw.poses.append(pose_msg(self.odom_path[i],self.key_stamps[i],self.frame))
+            if self.slam_path[i] is not None:
+                slam.poses.append(pose_msg(self.slam_path[i],self.key_stamps[i],self.frame))
+        self.path_pub.publish(actual);self.odom_path_pub.publish(raw)
+        if slam.poses:self.slam_path_pub.publish(slam)
+        self.cloud_pub.publish(self.make_cloud(self.graph.poses,actual.header))
+        self.odom_cloud_pub.publish(self.make_cloud(self.odom_path,actual.header))
+        self.pose_pub.publish(actual.poses[-1])
+        markers=MarkerArray()
+        for i,lm in enumerate(self.graph.landmarks):
+            m=Marker()
+            m.header=actual.header;m.ns='fixed_anchor' if lm.fixed else 'learned_cone'
+            m.id=i;m.type=Marker.CYLINDER;m.action=Marker.ADD
+            m.pose.position.x=lm.x;m.pose.position.y=lm.y;m.pose.orientation.w=1.
+            m.scale.x=.17;m.scale.y=.17;m.scale.z=.35
+            m.color.r=.05 if lm.fixed else .9
+            m.color.g=.85 if lm.fixed else .65
+            m.color.b=.2 if lm.fixed else .1
+            m.color.a=.95
+            markers.markers.append(m)
+        self.mark_pub.publish(markers)
+        self.save_trajectory_csv()
+
+    def save_trajectory_csv(self):
+        if self.path_csv is None or self.graph is None:
+            return
+        tmp=self.path_csv.with_suffix('.tmp.csv')
+        try:
+            with tmp.open('w',newline='',encoding='utf-8') as f:
+                w=csv.writer(f)
+                w.writerow(['keyframe','stamp_sec','raw_x_m','raw_y_m','raw_yaw_rad',
+                            'optimized_x_m','optimized_y_m','optimized_yaw_rad',
+                            'slam_x_m','slam_y_m','slam_yaw_rad'])
+                for i,(p,o,ref) in enumerate(zip(self.graph.poses,self.odom_path,self.slam_path)):
+                    t=self.key_stamps[i]
+                    w.writerow([i,t.sec+t.nanosec*1e-9,
+                                o.x,o.y,o.yaw,p.x,p.y,p.yaw,
+                                *([ref.x,ref.y,ref.yaw] if ref is not None else ['','',''])])
+            tmp.replace(self.path_csv)
+        except OSError as e:
+            self.get_logger().warn('Could not write trajectory CSV: '+str(e))
+
+    def get_scan_hits(self,msg,laser_in_base):
+        # 4x downsample of accepted scan points; no 'inf' free rays.
+        hits=[]
+        rmax=min(12.0,msg.range_max)
+        for i in range(0,len(msg.ranges),self.scan_stride):
+            r=float(msg.ranges[i])
+            if not math.isfinite(r) or not msg.range_min<=r<=rmax:continue
+            a=msg.angle_min+i*msg.angle_increment
+            hits.append(transform_point(laser_in_base,(r*math.cos(a),r*math.sin(a))))
+        return hits
+
+    def make_cloud(self,poses,header):
+        """Reproject historic endpoints using the latest pose graph solution.
+
+        This is *not* an occupancy probability map (no ray-clearing or free space).
+        """
+        xyz=array('f')
+        for pose,hits in zip(poses,self.keyframe_hits):
+            c,s=math.cos(pose.yaw),math.sin(pose.yaw)
+            for x,y in hits:
+                xyz.extend((pose.x+c*x-s*y,pose.y+s*x+c*y,0.0))
+        cloud=PointCloud2()
+        cloud.header=header
+        cloud.height=1;cloud.width=len(xyz)//3
+        cloud.fields=[PointField(name=name,offset=offset,datatype=PointField.FLOAT32,count=1)
+                      for name,offset in (('x',0),('y',4),('z',8))]
+        cloud.is_bigendian=(sys.byteorder=='big')
+        cloud.point_step=12;cloud.row_step=12*cloud.width
+        cloud.data=xyz.tobytes();cloud.is_dense=True
+        return cloud
+
+    def record_live_scan(self,delta,laser,msg,hits=None):
+        # 扫描相对最近关键帧保存，图优化后可按修正位姿重投。
+        frame=ScanFrame((laser.x,laser.y),hits if hits is not None else self.get_scan_hits(msg,laser))
+        odom_pose=compose(self.last_key_odom,delta)
+        stamp_s=msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
+        previous=self.last_map_observation
+        take=previous is None
+        if previous is not None:
+            old_pose,old_time=previous
+            moved=between(old_pose,odom_pose)
+            take=(math.hypot(moved.x,moved.y)>=self.map_observation_distance or
+                  abs(moved.yaw)>=self.map_observation_angle or
+                  stamp_s-old_time>=self.map_observation_interval or stamp_s<old_time)
+        if take:
+            self.live_scans.append((len(self.graph.poses)-1,delta,frame))
+            self.live_stamp=msg.header.stamp
+            self.last_map_observation=(odom_pose,stamp_s)
+        if self.scan_overlay_pub is not None:
+            # 当前扫描沿用投票地图的优化位姿和雷达外参。
+            pose=compose(self.graph.poses[-1],delta)
+            xyz=array('f')
+            for local_point in frame.hits:
+                x,y=transform_point(pose,local_point)
+                xyz.extend((x,y,.03))
+            cloud=PointCloud2()
+            cloud.header.frame_id=self.frame
+            cloud.header.stamp=msg.header.stamp
+            cloud.height=1
+            cloud.width=len(frame.hits)
+            cloud.fields=[PointField(name=name,offset=i*4,datatype=PointField.FLOAT32,count=1)
+                          for i,name in enumerate(('x','y','z'))]
+            cloud.is_bigendian=(sys.byteorder=='big')
+            cloud.point_step=12
+            cloud.row_step=12*cloud.width
+            cloud.data=xyz.tobytes()
+            cloud.is_dense=True
+            self.scan_overlay_pub.publish(cloud)
+
+    def on_render_map(self):
+        """Schedule a full history reprojection away from the ROS scan callback.
+
+        A snapshot ensures optimization cannot mutate the inputs mid-render.
+        There is at most one in-flight map job; stale results are discarded if
+        too many keyframes have arrived before publication.
+        """
+        if not self.locked or len(self.graph.poses)<1:
+            return
+        if self.map_future is not None:
+            return
+        poses=list(self.graph.poses)
+        raw=list(self.odom_path)
+        if self.live_ratio:
+            scans=self.live_scans.copy()
+            stamp=self.live_stamp
+            def render_live():
+                frames=[frame for _,_,frame in scans]
+                optimized=[compose(poses[i],delta) for i,delta,_ in scans]
+                original=[compose(raw[i],delta) for i,delta,_ in scans]
+                grid=self.grid_mapper.render(optimized,frames,self.optimized_votes)
+                odom_grid=self.grid_mapper.render(original,frames,self.odom_votes)
+                if self.log_path:
+                    from export_cone_factor_map import write_pgm_yaml
+                    try:
+                        write_pgm_yaml(self.to_grid_msg(grid,stamp),Path(self.log_path).parent/'anchor_graph_live',live=True)
+                    except OSError as error:
+                        self.get_logger().error('实时地图写盘失败：'+str(error))
+                return grid,odom_grid,stamp,len(poses)
+            self.map_future=self.map_executor.submit(render_live)
+            return
+        frames=[ScanFrame(orig,tuple(hits))
+                for orig,hits in zip(self.keyframe_origins,self.keyframe_hits)]
+        stamp=self.key_stamps[-1]
+        self.map_future=self.map_executor.submit(
+            lambda: (self.grid_mapper.render(poses,frames),
+                     self.grid_mapper.render(raw,frames),stamp,len(poses)))
+
+    def poll_render_map(self):
+        if self.map_future is None or not self.map_future.done():
+            return
+        future=self.map_future
+        self.map_future=None
+        try:
+            improved,original,stamp,n_poses=future.result()
+        except Exception as e:
+            self.get_logger().error('Occupancy reprojection failed: '+str(e))
+            self.send({'event':'grid_error','message':str(e)})
+            return
+        # The grid represents an explicitly timestamped historical snapshot.
+        self.grid_pub.publish(self.to_grid_msg(improved,stamp))
+        self.grid_odom_pub.publish(self.to_grid_msg(original,stamp))
+        self.map_renders+=1
+        self.send({'event':'grid_published','n_scans':improved.n_scans,
+                   'n_valid_ray_endpoints':improved.n_hits,
+                   'snapshot_keyframes':n_poses,
+                   'map_reprojections':self.map_renders,
+                   'grid_resolution_m':improved.resolution,
+                   'occupied_cells':int((improved.cells==100).sum())})
+
+    def to_grid_msg(self, result, stamp):
+        out=OccupancyGrid()
+        out.header.frame_id=self.frame
+        out.header.stamp=stamp
+        out.info.map_load_time=stamp
+        out.info.resolution=result.resolution
+        out.info.width=result.width
+        out.info.height=result.height
+        out.info.origin.position.x=result.origin_x
+        out.info.origin.position.y=result.origin_y
+        out.info.origin.orientation.w=1.0
+        out.data=result.cells.reshape(-1).astype('int8').tolist()
+        return out
+
+    def on_report(self):
+        if not self.locked:
+            self.get_logger().info(f'Waiting for stationary start: {self.builder.frames}/{self.ref_frames} scans, '
+                                   f'{len(self.builder.clusters)} clusters')
+        else:
+            self.get_logger().info(f'poses={len(self.graph.poses)}, landmarks={len(self.graph.landmarks)}, '
+                                   f'fixed_anchor_observations={self.anchor_observations}, '
+                                   f'learned_observations={self.dynamic_observations}, '
+                                   f'last_anchor_key={self.last_anchor_key}, TF_failures={self.tf_failures}')
+
+    def destroy_node(self):
+        self.map_executor.shutdown(wait=False,cancel_futures=True)
+        if self.logfile:self.logfile.close()
+        return super().destroy_node()
+
+
+def main():
+    rclpy.init()
+    node=ConeFactorGraphNode()
+    try:rclpy.spin(node)
+    except KeyboardInterrupt:pass
+    except Exception:
+        import traceback
+        detail=traceback.format_exc()
+        node.get_logger().error(detail)
+        if node.logfile:
+            node.send({'event':'fatal_error','traceback':detail})
+        raise
+    finally:
+        node.destroy_node()
+        if rclpy.ok():rclpy.shutdown()
+
+if __name__=='__main__': main()

@@ -40,7 +40,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu, LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
 
@@ -279,6 +279,8 @@ class ScanTfBridge(Node):
         self.static.sendTransform(make_tf(self.get_clock().now().to_msg(), self.base_frame,
                                           self.laser_frame, *laser))
         self.pub = self.create_publisher(LaserScan, '/scan_pc', qos_profile_sensor_data)
+        self.mapping_paused = False
+        self.create_subscription(Bool, '/mapping_pause_scans', self.on_mapping_pause, 10)
         # 同一帧不做地面线过滤的版本（只去畸变 + 重采样），给 vote_map 画“只投票、不剔除”的对比图
         self.pub_raw = self.create_publisher(LaserScan, '/scan_pc_raw', qos_profile_sensor_data)
         self.odom_pc = self.create_publisher(Odometry, '/odom_pc', 50)
@@ -455,7 +457,16 @@ class ScanTfBridge(Node):
         out.ranges = ranges
         return out
 
+    def on_mapping_pause(self, msg):
+        paused = bool(msg.data)
+        if paused and not self.mapping_paused:
+            self.pending.clear()
+            self.get_logger().warn('建图扫描已暂停；车辆运动不受影响，地图仍可保存。')
+        self.mapping_paused = paused
+
     def on_scan(self, msg):
+        if self.mapping_paused:
+            return
         self.input_scans += 1
         t = stamp_sec(msg.header.stamp)
         last = self.pending[-1][0] if self.pending else self.last_stamp
@@ -545,6 +556,7 @@ class ScanTfBridge(Node):
                 f'扣住等里程计 {self.wait_n} 帧（最长 {self.wait_max:.2f} s，等满 {self.odom_wait:.1f} s 仍没等到 {self.wait_timeout} 帧）')
         status = {'odom_source': 'imu' if self.imu_only else 'odom',
                   'input_scans': self.input_scans,
+                  'mapping_paused': self.mapping_paused,
                   'ground_filter': 'off' if self.ground is None else self.ground.mode}
         # [扣住等里程计的帧数, 最长等了几秒, 等满仍没等到的帧数, 插值失败帧数]，5 s 一组
         status['odom_wait'] = [self.wait_n, round(self.wait_max, 2), self.wait_timeout, self.interp_miss]
@@ -579,7 +591,7 @@ class ScanTfBridge(Node):
         self.link_pub.publish(String(data=json.dumps(status, ensure_ascii=False)))
         self.speed_log = 0.0
         self.interp_miss = 0
-        if self.input_scans == 0:
+        if self.input_scans == 0 and not self.mapping_paused:
             self.get_logger().warn('5s 内没有收到 /scan')
         if self.use_odom and self.input_scans > 0 and self.odoms == 0:
             self.no_odom_reports += 1

@@ -68,6 +68,7 @@ def parse_args():
     p.add_argument('--run-index', type=int, choices=(1, 2, 3), required=True)
     p.add_argument('--map-dir', required=True)
     p.add_argument('--raw-only', action='store_true', help='只保存原始 SLAM 地图和位姿图，不做投票、描黑或赛道拟合')
+    p.add_argument('--save-vote', action='store_true', help='原图模式同时保存已有投票地图，不执行拟合')
     return p.parse_known_args()[0]
 
 
@@ -158,14 +159,14 @@ def main():
                     names.append('solid.json')
                 (staged / 'map_solid.raw').unlink(missing_ok=True)
             # 两种投票地图：map_vote_raw.*（只投票，挡板 / 地面线都留着）、map_vote.*（投票 + 地面剔除）
-            for _ in range(0 if args.raw_only else 10):
+            for _ in range(0 if args.raw_only and not args.save_vote else 10):
                 if len(node.votes) == 2:
                     break
                 rclpy.spin_once(node, timeout_sec=0.2)
-            for name, grid in ([] if args.raw_only else sorted(node.votes.items())):
+            for name, grid in ([] if args.raw_only and not args.save_vote else sorted(node.votes.items())):
                 write_occupancy_map(grid, staged / name)
                 names += [f'{name}.pgm', f'{name}.png', f'{name}.yaml', f'{name}.raw']
-            if not args.raw_only and len(node.votes) < 2:
+            if (not args.raw_only or args.save_vote) and len(node.votes) < 2:
                 print('没收到 vote_map 的投票地图（launch 的 vote 关了？），这次只存 SLAM 原图', flush=True)
             files = {}
             for name in names:

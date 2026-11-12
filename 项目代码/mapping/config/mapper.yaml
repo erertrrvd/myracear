@@ -17,8 +17,8 @@ slam_toolbox:
     # 阈值太严会把细锥桶一起过滤掉。模拟实测（车速 1.5 m/s，12 个锥桶）：
     #   0.35/4 只找回 2/12；0.20/3 找回 6/12 且走动物体不留痕迹；0.10/2 找回 7/12 但开始留痕迹。
     # 所以取 0.20/3。仍嫌锥桶少/小：建图那一圈开慢一点（0.5 m/s 时 6/6 锥桶都能找回）。
-    min_pass_through: 3
-    occupancy_threshold: 0.20
+    min_pass_through: 1
+    occupancy_threshold: 0.01
     # 室内赛场不需要 25 m：远处点噪声大，且无回波的射线会穿墙擦出条纹
     max_laser_range: 12.0
     minimum_time_interval: 0.05

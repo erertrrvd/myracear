@@ -3,7 +3,7 @@
 #
 #   .\run_slam_windows.ps1                        启动建图（地图目录自动按时间新建）
 #   .\run_slam_windows.ps1 -Check                 联机检查：看有没有收到小车的 /scan、里程计
-#   .\run_slam_windows.ps1 -Save                  保存地图（建图窗口保持运行，另开窗口执行）；存完自动描黑、生成并打开 run1\report.html
+#   .\run_slam_windows.ps1 -Save                  保存原始地图与位姿图，不做投票、描黑或赛道拟合
 #   .\run_slam_windows.ps1 -Report                给最新一次地图生成建图报告并打开（-MapDir 指定目录；有 run1 用 run1，没有用 autosave）
 #   .\run_slam_windows.ps1 -NoOdom                没有里程计，纯激光匹配
 #   .\run_slam_windows.ps1 -Domain 42 -MapDir D:/ubuntu/slam/maps/test1 -RunIndex 1
@@ -12,7 +12,7 @@
 #   .\run_slam_windows.ps1 -Mode filtered        带阈值建图（默认）：occupancy_threshold 0.20 / min_pass_through 3
 #   .\run_slam_windows.ps1 -AutoSave 30           每 30 秒自动存一份到 <地图目录>\autosave\（默认 60，0 = 关；只是保险，正式保存仍要 -Save）
 #   .\run_slam_windows.ps1 -LiveSolid             建图时实时描黑锥桶（rviz 里 Map Solid 层）。默认不开：-Save 存完原图后自动描黑，生成 map_solid.*
-#   .\run_slam_windows.ps1 -NoVote                不起 vote_map（默认起：rviz 里 Map Vote Raw / Map Vote 两层，-Save 时存 map_vote_raw.* 只投票、map_vote.* 投票 + 地面剔除）
+#   .\run_slam_windows.ps1 -NoVote                兼容旧参数；独立投票地图默认关闭
 #   .\run_slam_windows.ps1 -Ground off            关掉地面线过滤（默认 auto：车动起来后自己认出跟着车走的地面线并删掉）
 #   .\run_slam_windows.ps1 -Ground fixed -GroundRho 3.05 -GroundDeg 1.5   直接给定地面线（静止建图用；数值看建图窗口“认出地面线”那行）
 #   .\run_slam_windows.ps1 -Odom ekf              EKF 融合建图：电脑上 robot_localization 融合 /encoder 轮速 + /IMU_data 角速度，雷达由 SLAM 匹配（默认 -Odom key1 用 /key1_odom）
@@ -42,7 +42,7 @@ param(
     [double]$GroundRho = 0, [double]$GroundDeg = 0,
     [ValidateSet('key1', 'ekf', 'imu')][string]$Odom = 'key1',
     [double]$GyroScale = 1.0,
-    [switch]$OdomOnly,
+    [switch]$OdomOnly, [switch]$AnchorGraph, [switch]$PauseAfterLap, [switch]$NoField,
     [switch]$NoDeskew,
     [switch]$Fast,
     [ValidateSet('', 'A', 'B', 'C', 'D')][string]$Track = ''
@@ -169,7 +169,8 @@ if (-not $MapDir) {
         $MapDir = $latest.FullName
     } else {
         $suffix = if ($Mode -eq 'native') { '_native' } elseif ($Fast) { '_fast' } else { '_filtered' }
-        if ($OdomOnly) { $suffix += '_odom_only' }
+        if ($AnchorGraph) { $suffix += '_anchor_graph' }
+        elseif ($OdomOnly) { $suffix += '_odom_only' }
         elseif ($Odom -eq 'ekf') { $suffix += '_ekf' } elseif ($Odom -eq 'imu') { $suffix += '_imu' }
         $MapDir = "$slam\maps\run_" + (Get-Date -Format 'yyyyMMdd_HHmm') + $suffix
     }
@@ -178,12 +179,24 @@ $mapDirFs = $MapDir.Replace([string][char]92, '/')
 
 if ($Save) {
     $modeFile = Join-Path $MapDir (".run{0}-mode.json" -f $RunIndex)
-    $rawOnly = $false
-    if (Test-Path -LiteralPath $modeFile) { $rawOnly = [bool]((Get-Content -LiteralPath $modeFile -Raw -Encoding utf8 | ConvertFrom-Json).raw_only) }
+    $rawOnly = $true
+    $anchorSave = $false
+    if (Test-Path -LiteralPath $modeFile) {
+        $savedMode = Get-Content -LiteralPath $modeFile -Raw -Encoding utf8 | ConvertFrom-Json
+        $anchorSave = [bool]$savedMode.anchor_graph
+    }
     $saveArgs = @('--run-index', "$RunIndex", '--map-dir', $mapDirFs)
-    if ($rawOnly) { $saveArgs += '--raw-only'; Write-Host "基础建图：保存到 $MapDir (run$RunIndex)，只存原图和位姿图。" }
+    if ($rawOnly) { $saveArgs += @('--raw-only','--save-vote'); Write-Host "保存到 $MapDir (run$RunIndex)：原图、位姿图及已收到的投票地图，不做赛道拟合。" }
     else { $trackMsg = if ($Track) { "赛道 $Track（快捷键 $($Track.ToLower())）" } else { '赛道自动选最像的（快捷键 3）' }; Write-Host "保存到 $MapDir (run$RunIndex)，拟合：$trackMsg ..." }
     pixi run --frozen python "$proj\mapping\scripts\save_mapping" @saveArgs
+    if ($anchorSave) {
+        # 因子图使用独立地图；两张地图从同一套关键帧分别导出，供直接对照。
+        $export = "$proj\mapping\scripts\export_cone_factor_map.py"
+        foreach ($item in @(@('/cone_factor_graph/map', 'anchor_graph'), @('/cone_factor_graph/odom_map', 'anchor_odom'))) {
+            pixi run --frozen python $export --topic $item[0] --output "$mapDirFs/run$RunIndex/$($item[1])" --timeout 15
+            if ($LASTEXITCODE -ne 0) { Write-Warning "锥桶地图 $($item[1]) 未保存：检查是否锁定锚点并生成地图。" }
+        }
+    }
     if (Test-Path "$MapDir\run$RunIndex\report.html") { Start-Process "$MapDir\run$RunIndex\report.html" }   # 建图报告，自动打开
     return
 }
@@ -194,6 +207,7 @@ if ($Fast) {   # 高速两圈：回环搜索放大到 8 m，其余（含移动�
     $mapperCfg = "$proj\mapping\config\mapper_fast.yaml"
 }
 if ($OdomOnly -and ($NoOdom -or $Odom -ne 'key1')) { Write-Host '!! -OdomOnly 只能使用默认的 -Odom key1，不能和 -NoOdom / -Odom ekf / -Odom imu 同用' -ForegroundColor Red; exit 1 }
+if ($AnchorGraph -and -not $OdomOnly) { Write-Host '!! -AnchorGraph 必须同时使用 -OdomOnly' -ForegroundColor Red; exit 1 }
 if (-not (Test-Path $mapperCfg)) { Write-Host "!! 找不到参数文件：$mapperCfg" -ForegroundColor Red; exit 1 }
 $useOdom = if ($NoOdom) { 'false' } else { 'true' }
 $rviz    = if ($NoRviz) { 'false' } else { 'true' }
@@ -212,13 +226,27 @@ Write-Host "建图：map_dir=$MapDir  run_index=$RunIndex  domain=$env:ROS_DOMAI
 Write-Host "提醒：建完图后另开窗口运行  .\run_slam_windows.bat -Save  并看到“已完整保存”再关本窗口。"
 $null = New-Item -ItemType Directory -Force -Path $MapDir
 $modeFile = Join-Path $MapDir (".run{0}-mode.json" -f $RunIndex)
-$modeJson = @{ source = $Odom; raw_only = ($Odom -eq 'imu'); odom_only = [bool]$OdomOnly } | ConvertTo-Json -Compress
+$modeJson = @{ source = $Odom; raw_only = ($Odom -eq 'imu'); odom_only = [bool]$OdomOnly; anchor_graph = [bool]$AnchorGraph } | ConvertTo-Json -Compress
 [IO.File]::WriteAllText($modeFile, $modeJson, (New-Object System.Text.UTF8Encoding($false)))
 $liveLog = "$MapDir\.run$RunIndex-live.jsonl"
 $launchArgs = @('run','--frozen','ros2','launch',"`"$proj\mapping\launch\distributed_mapping_pc_windows.launch.py`"",
                 "map_dir:=$mapDirFs","run_index:=$RunIndex","use_odom:=$useOdom","rviz:=$rviz","solid:=$solid","vote:=$vote","autosave_period:=$autoSaveArg","mapper_config:=$mapperCfg",
                 "ground_filter:=$Ground","ground_rho:=$groundRhoArg","ground_theta_deg:=$groundDegArg",
                 "odom_source:=$Odom","odom_only:=$odomOnlyArg","imu_gyro_scale:=$gyroArg","deskew:=$deskew")
+if ($PauseAfterLap) { $launchArgs += 'pause_after_lap:=true' }
+if ($AnchorGraph) {
+    $launchArgs += 'anchor_graph:=true'
+    $launchArgs += @('field_enabled:=false','anchor_vote_ratio:=0.35','anchor_live_ratio:=true')
+    if ($NoField) {
+        $rvizFile = 'cone_factor_graph_no_field.rviz'
+        Write-Host '锥桶因子图实验：不启用场地假墙，投票命中比例 0.35；起点保持静止，等待 LOCKED。' -ForegroundColor Yellow
+    } else {
+        $launchArgs += 'anchor_scan_overlay:=true'
+        $rvizFile = 'cone_factor_graph_live_scan.rviz'
+        Write-Host '实时因子图：无假墙，35% 投票，红点为当前扫描；起点静止等待 LOCKED。' -ForegroundColor Yellow
+    }
+    $launchArgs += "rviz_config:=$($proj.Replace([string][char]92, '/'))/mapping/rviz/$rvizFile"
+}
 $launchProc = Start-Process pixi -ArgumentList $launchArgs -NoNewWindow -PassThru
 
 # 前台每 5 秒读一次状态日志：打印进度和告警（Python 节点的告警不会实时出现在 launch 输出里，所以用日志文件）

@@ -19,9 +19,9 @@ slam_toolbox:
     ceres_dogleg_type: TRADITIONAL_DOGLEG
     ceres_loss_function: None
     resolution: 0.05
-    # 移动目标剔除：与 mapper.yaml 相同（0.20/3）
-    min_pass_through: 3
-    occupancy_threshold: 0.20
+    # 降低占据判断门槛，尽量保留细锥桶；SLAM 自身仍使用占据栅格统计。
+    min_pass_through: 1
+    occupancy_threshold: 0.01
     max_laser_range: 12.0
     minimum_time_interval: 0.05
     throttle_scans: 1

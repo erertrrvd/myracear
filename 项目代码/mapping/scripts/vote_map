@@ -29,6 +29,7 @@ import threading
 import time
 
 import numpy as np
+from vote_classification import classify_votes
 import rclpy
 from nav_msgs.msg import OccupancyGrid
 from rclpy.duration import Duration
@@ -83,6 +84,7 @@ class VoteMap(Node):
         self.free_range = float(p('free_range', 8.0))        # 射线经过只画到这么远（省时间）
         self.thresh = float(p('occupancy_threshold', 0.20))  # 同 mapper.yaml
         self.min_pass = int(p('min_pass_through', 3))         # 同 mapper.yaml
+        self.strict_ratio = bool(p('strict_ratio', False))   # 按命中 / 总观测比例判断，不额外保留两次命中
         self.kf_dist = float(p('keyframe_dist', 0.15))       # 车走这么远 / 转这么多才投一帧（停车不重复投）
         self.kf_turn = float(p('keyframe_turn', 0.10))
         self.period = float(p('publish_period', 1.0))
@@ -338,9 +340,7 @@ class VoteMap(Node):
         if si1 > si0 and sj1 > sj0:
             hit = v.hit[sj0:sj1, si0:si1]
             pas = v.pas[sj0:sj1, si0:si1]
-            with np.errstate(invalid='ignore', divide='ignore'):
-                occ = hit >= self.thresh * pas
-            sub = np.where(pas >= self.min_pass, np.where(occ, 100, 0), -1).astype(np.int8)
+            sub = classify_votes(hit, pas, self.thresh, self.min_pass, self.strict_ratio)
             out[sj0 - j0:sj1 - j0, si0 - i0:si1 - i0] = sub
         return out, ox, oy, w, h
 

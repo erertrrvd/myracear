@@ -1,0 +1,78 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ''
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/Map
+      Name: 锥桶因子图地图
+      Enabled: true
+      Alpha: 1
+      Color Scheme: map
+      Topic:
+        Value: /cone_factor_graph/map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Value: true
+    - Class: rviz_default_plugins/Map
+      Name: 原始里程计对照地图
+      Enabled: false
+      Alpha: 1
+      Color Scheme: map
+      Topic:
+        Value: /cone_factor_graph/odom_map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Value: false
+    - Class: rviz_default_plugins/Path
+      Name: 优化轨迹
+      Enabled: true
+      Color: 0; 255; 0
+      Topic:
+        Value: /cone_factor_graph/path
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: 原始里程计轨迹
+      Enabled: true
+      Color: 255; 80; 0
+      Topic:
+        Value: /cone_factor_graph/odom_path
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: 锥桶地标
+      Enabled: true
+      Topic:
+        Value: /cone_factor_graph/landmarks
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: anchor_map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 20
+Window Geometry:
+  Height: 900
+  Width: 1400

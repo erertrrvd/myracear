@@ -42,8 +42,11 @@ def _setup(context):
     ekf = use_odom == 'true' and odom_source == 'ekf'
     imu_only = use_odom == 'true' and odom_source == 'imu'
     odom_only = use_odom == 'true' and boolean('odom_only')
+    anchor_graph = boolean('anchor_graph')
     if odom_only and odom_source != 'key1':
         raise RuntimeError('odom_only:=true 只支持 odom_source:=key1')
+    if anchor_graph and not odom_only:
+        raise RuntimeError('锥桶因子图实验必须使用 odom_only:=true')
 
     slam_overrides = {'scan_topic': '/scan_pc', 'odom_frame': 'odom_pc',
                       'base_frame': 'base_pc', 'map_frame': 'map'}
@@ -98,9 +101,29 @@ def _setup(context):
              parameters=[value('mapper_config'), slam_overrides]),
         py('mapping_status_logger', str(root / f'.run{run_index}-live.jsonl'), str(run_index),
            '/scan_pc', '/odom_pc'),
+        *([py('pause_after_lap')] if boolean('pause_after_lap') else []),
         *([py('map_autosave', str(root), str(autosave))] if autosave > 0 else []),
         # 两种投票地图 /map_vote_raw（只投票）、/map_vote（投票 + 地面剔除），按位姿图优化实时重投；只用来看
-        *([py('vote_map')] if boolean('vote') else []),
+        *([py('vote_map', '--ros-args', '-p', 'use_graph:=false',
+              *([] if anchor_graph else ['-p', 'strict_ratio:=true', '-p', 'occupancy_threshold:=0.275',
+                                         '-p', 'keyframe_dist:=0.0', '-p', 'keyframe_turn:=0.0',
+                                         '-p', 'free_range:=12.0'])) if odom_only
+           else py('vote_map')] if boolean('vote') else []),
+        # 锥桶实验仅订阅扫描和位姿，独立发布地图与轨迹，不接管车辆控制。
+        *([py('cone_factor_graph_node', '--ros-args', '-p',
+              f'log_path:={(root / "cone_factor_graph.jsonl").as_posix()}',
+              '-p', f'field_enabled:={str(boolean("field_enabled")).lower()}',
+              '-p', f'field_front_m:={float(value("field_front_m"))}',
+              '-p', f'field_back_m:={float(value("field_back_m"))}',
+              '-p', f'field_left_m:={float(value("field_left_m"))}',
+              '-p', f'field_right_m:={float(value("field_right_m"))}',
+              '-p', f'live_ratio_map:={str(boolean("anchor_live_ratio")).lower()}',
+              '-p', f'scan_overlay:={str(boolean("anchor_scan_overlay")).lower()}',
+              *(['-p', 'live_grid_min_hits:=2', '-p', 'grid_unconfirmed_unknown:=true',
+                 '-p', 'map_observation_distance:=0.12', '-p', 'map_observation_angle:=0.06',
+                 '-p', 'map_observation_interval:=1.0'] if boolean('anchor_scan_overlay') else []),
+              '-p', f'grid_min_hit_ratio:={float(value("anchor_vote_ratio"))}')]
+          if anchor_graph else []),
         # 实体化障碍层：/map_solid（只用来看，不影响 SLAM）
         *([py('obstacle_layer', str(root), str(run_index))] if boolean('solid') else []),
         Node(package='rviz2', executable='rviz2', output='screen',
@@ -118,9 +141,17 @@ def generate_launch_description():
         'autosave_period': '60',   # 每隔多少秒自动存一份到 <map_dir>/autosave/（0=关）
         'use_odom': 'true',
         'odom_only': 'false',      # true：位姿完全用轮速+IMU，激光只画图，不做扫描匹配或回环修正
+        'anchor_graph': 'false',   # 独立起点锥桶因子图，仅用于实验对照
+        'pause_after_lap': 'false',
+        'field_enabled': 'false',  # 场地边界必须明确起点位置后启用
+        'anchor_vote_ratio': '0.22', # 因子图地图：每格有效命中比例
+        'anchor_live_ratio': 'false',
+        'anchor_scan_overlay': 'false',
+        'field_front_m': '-1.0', 'field_back_m': '-1.0',
+        'field_left_m': '-1.0', 'field_right_m': '-1.0',
         'odom_source': 'key1',     # key1：轮速+IMU；ekf：EKF 融合；imu：仅 IMU 航向
         'imu_gyro_scale': '1.0',   # EKF 模式：IMU 角速度乘的系数（度/秒 用 0.01745，方向反用 -1；看 ekf_input 的航向自检）
-        'vote': 'true',            # 两种投票地图 vote_map（rviz 实时看，保存时存 map_vote*）；false 关
+        'vote': 'false',           # 默认关闭独立投票图，保留地面线过滤
         'solid': 'false',         # 实时描黑 obstacle_layer -> /map_solid；默认关，存图后 save_mapping 自动后处理描黑
         'deskew': 'true',          # 11-04 起默认开：高速（3 m/s）时一圈内车走 30 cm，要逐点去畸变
         'scan_period': '0.1',

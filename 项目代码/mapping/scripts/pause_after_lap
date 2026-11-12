@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+import math
+import rclpy
+from rclpy.node import Node
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
+from lap_detector import LapDetector
+
+class PauseAfterLap(Node):
+    def __init__(self):
+        super().__init__('pause_after_lap')
+        self.detector=LapDetector()
+        self.pub=self.create_publisher(Bool,'/mapping_pause_scans',10)
+        self.create_subscription(Odometry,'/key1_odom',self.on_odom,50)
+        self.create_timer(1.0,self.repeat_pause)
+        self.get_logger().info('一圈自动暂停建图：离开 5 米、累计 20 米、至少 15 秒、回到起点 1.5 米内且朝向相近；不控制车辆。')
+
+    def on_odom(self,msg):
+        p=msg.pose.pose.position; q=msg.pose.pose.orientation
+        yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+        t=msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
+        if self.detector.update(t,p.x,p.y,yaw):
+            self.pub.publish(Bool(data=True))
+            self.get_logger().warn('判断已完成一圈，已请求暂停建图扫描；车辆不会自动停止。')
+
+    def repeat_pause(self):
+        if self.detector.done: self.pub.publish(Bool(data=True))
+
+def main():
+    rclpy.init(); node=PauseAfterLap()
+    try: rclpy.spin(node)
+    finally: node.destroy_node(); rclpy.shutdown()
+
+if __name__=='__main__': main()
